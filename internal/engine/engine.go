@@ -467,6 +467,9 @@ func (e *Engine) dispatch(ctx context.Context, request Request) (any, error) {
 			return nil, err
 		}
 		return e.exclusive("配置直连保护", func() (any, error) { return e.setClaudeBlock(params.Enabled) })
+	case "proxyCredentials":
+		settings := e.currentSettings()
+		return ProxyCredentials{Username: settings.ProxyUsername, Password: settings.ProxyPassword}, nil
 	case "dashboardURL":
 		settings := e.currentSettings()
 		if !controller.New(settings.ControllerPort, settings.ControllerSecret).Healthy() {
@@ -629,10 +632,16 @@ type settingsPatch struct {
 	TailscaleControlURL *string `json:"tailscaleControlURL"`
 	TailscaleExitNode   *string `json:"tailscaleExitNode"`
 
-	OVPNPath       *string `json:"ovpnPath"`
-	Remote         *string `json:"remote"`
-	TunEnabled     *bool   `json:"tunEnabled"`
-	AllowLAN       *bool   `json:"allowLAN"`
+	OVPNPath   *string `json:"ovpnPath"`
+	Remote     *string `json:"remote"`
+	TunEnabled *bool   `json:"tunEnabled"`
+	AllowLAN   *bool   `json:"allowLAN"`
+	// ProxyAuth 为 true 时局域网代理要求认证：需要用户名（本次传入或已保存），
+	// 没有密码时自动生成；为 false 时清除用户名和密码。
+	ProxyAuth     *bool   `json:"proxyAuth"`
+	ProxyUsername *string `json:"proxyUsername"`
+	// ProxyPassword 为空字符串时重新生成密码。
+	ProxyPassword  *string `json:"proxyPassword"`
 	ChinaDirect    *bool   `json:"chinaDirect"`
 	MixedPort      *int    `json:"mixedPort"`
 	ControllerPort *int    `json:"controllerPort"`
@@ -763,6 +772,9 @@ func (e *Engine) updateSettings(patch settingsPatch) (any, error) {
 	if patch.AllowLAN != nil {
 		settings.AllowLAN = *patch.AllowLAN
 	}
+	if err := applyProxyAuth(&settings, patch); err != nil {
+		return nil, err
+	}
 	if patch.ChinaDirect != nil {
 		settings.ChinaDirect = *patch.ChinaDirect
 	}
@@ -845,6 +857,46 @@ func (e *Engine) updateSettings(patch settingsPatch) (any, error) {
 		message += "；重载 Mihomo 后生效"
 	}
 	return ActionResult{Message: message}, nil
+}
+
+// applyProxyAuth 按 patch 修改局域网代理认证，规则与命令行的
+// --proxy-user / --proxy-auth / --no-proxy-auth 一致。
+func applyProxyAuth(settings *config.Settings, patch settingsPatch) error {
+	if patch.ProxyAuth == nil && patch.ProxyUsername == nil && patch.ProxyPassword == nil {
+		return nil
+	}
+	if patch.ProxyAuth != nil && !*patch.ProxyAuth {
+		settings.ProxyUsername, settings.ProxyPassword = "", ""
+		return nil
+	}
+	if patch.ProxyUsername != nil {
+		username := strings.TrimSpace(*patch.ProxyUsername)
+		if username == "" {
+			return failure(CodeInvalidParams, "请填写代理用户名")
+		}
+		if err := config.CheckProxyUsername(username); err != nil {
+			return failure(CodeInvalidParams, "%s", err.Error())
+		}
+		settings.ProxyUsername = username
+	}
+	if settings.ProxyUsername == "" {
+		return failure(CodeInvalidParams, "请先填写代理用户名")
+	}
+	if patch.ProxyPassword != nil {
+		password := strings.TrimSpace(*patch.ProxyPassword)
+		if err := config.CheckProxyPassword(password); err != nil {
+			return failure(CodeInvalidParams, "%s", err.Error())
+		}
+		settings.ProxyPassword = password
+	}
+	if settings.ProxyPassword == "" {
+		password, err := config.NewProxyPassword()
+		if err != nil {
+			return err
+		}
+		settings.ProxyPassword = password
+	}
+	return nil
 }
 
 func (e *Engine) testRoute(input string) (any, error) {
@@ -1180,6 +1232,9 @@ func settingsView(settings config.Settings) Settings {
 		Remote:              settings.Remote,
 		TunEnabled:          settings.TunEnabled,
 		AllowLAN:            settings.AllowLAN,
+		ProxyUsername:       settings.ProxyUsername,
+		ProxyAuth:           settings.ProxyAuthEnabled(),
+		HasProxyPassword:    settings.ProxyPassword != "",
 		ChinaDirect:         settings.ChinaDirect,
 		MixedPort:           settings.MixedPort,
 		ControllerPort:      settings.ControllerPort,

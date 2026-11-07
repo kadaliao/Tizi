@@ -752,3 +752,73 @@ func TestLocalClaudeNodeIsAlwaysDirect(t *testing.T) {
 		t.Fatalf("node and connection method should be saved together: %+v", saved)
 	}
 }
+
+// TestProxyAuthMatchesCommandLine 覆盖桌面版的局域网代理认证：开启时自动生成
+// 密码，密码不进快照、只能用 proxyCredentials 取，关闭时清除用户名和密码。
+func TestProxyAuthMatchesCommandLine(t *testing.T) {
+	engine, paths := newTestEngine(t, io.Discard)
+	update := func(params string) error {
+		_, err := engine.dispatch(context.Background(), Request{Method: "updateSettings", Params: json.RawMessage(params)})
+		return err
+	}
+
+	if err := update(`{"proxyAuth":true}`); err == nil {
+		t.Fatal("没有用户名时开启认证应被拒绝")
+	}
+	if err := update(`{"proxyAuth":true,"proxyUsername":"a:b"}`); err == nil {
+		t.Fatal("含冒号的用户名应被拒绝")
+	}
+	if err := update(`{"allowLAN":true,"proxyAuth":true,"proxyUsername":" alice "}`); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := config.Load(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.ProxyUsername != "alice" || len(saved.ProxyPassword) != 32 || !saved.AllowLAN {
+		t.Fatalf("保存的认证 = %q / %q", saved.ProxyUsername, saved.ProxyPassword)
+	}
+
+	data, err := json.Marshal(engine.snapshot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), saved.ProxyPassword) {
+		t.Fatal("快照不应包含代理密码")
+	}
+	var snapshot Snapshot
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if !snapshot.Settings.ProxyAuth || snapshot.Settings.ProxyUsername != "alice" || !snapshot.Settings.HasProxyPassword {
+		t.Fatalf("快照里的认证 = %+v", snapshot.Settings)
+	}
+	result, err := engine.dispatch(context.Background(), Request{Method: "proxyCredentials"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if credentials := result.(ProxyCredentials); credentials.Password != saved.ProxyPassword {
+		t.Fatalf("proxyCredentials = %+v", credentials)
+	}
+
+	// 改用户名保留密码；传空密码重新生成。
+	if err := update(`{"proxyUsername":"bob"}`); err != nil {
+		t.Fatal(err)
+	}
+	if got := engine.currentSettings(); got.ProxyUsername != "bob" || got.ProxyPassword != saved.ProxyPassword {
+		t.Fatalf("改用户名后 = %q / %q", got.ProxyUsername, got.ProxyPassword)
+	}
+	if err := update(`{"proxyPassword":""}`); err != nil {
+		t.Fatal(err)
+	}
+	if got := engine.currentSettings(); got.ProxyPassword == "" || got.ProxyPassword == saved.ProxyPassword {
+		t.Fatal("空密码应重新生成")
+	}
+
+	if err := update(`{"proxyAuth":false}`); err != nil {
+		t.Fatal(err)
+	}
+	if got := engine.currentSettings(); got.ProxyUsername != "" || got.ProxyPassword != "" {
+		t.Fatalf("关闭认证后 = %q / %q", got.ProxyUsername, got.ProxyPassword)
+	}
+}

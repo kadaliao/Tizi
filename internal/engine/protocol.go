@@ -162,13 +162,18 @@ type Settings struct {
 	TailscaleControlURL string `json:"tailscaleControlURL"`
 	TailscaleExitNode   string `json:"tailscaleExitNode"`
 
-	TunEnabled     bool   `json:"tunEnabled"`
-	AllowLAN       bool   `json:"allowLAN"`
-	ChinaDirect    bool   `json:"chinaDirect"`
-	MixedPort      int    `json:"mixedPort"`
-	ControllerPort int    `json:"controllerPort"`
-	DNSPort        int    `json:"dnsPort"`
-	CoreChannel    string `json:"coreChannel"`
+	TunEnabled bool `json:"tunEnabled"`
+	AllowLAN   bool `json:"allowLAN"`
+	// ProxyUsername 是局域网代理认证的用户名；ProxyAuth 表示用户名和密码都
+	// 设置了，局域网连接需要认证。密码不随快照推送，用 proxyCredentials 取。
+	ProxyUsername    string `json:"proxyUsername"`
+	ProxyAuth        bool   `json:"proxyAuth"`
+	HasProxyPassword bool   `json:"hasProxyPassword"`
+	ChinaDirect      bool   `json:"chinaDirect"`
+	MixedPort        int    `json:"mixedPort"`
+	ControllerPort   int    `json:"controllerPort"`
+	DNSPort          int    `json:"dnsPort"`
+	CoreChannel      string `json:"coreChannel"`
 	// ClaudeProxy 是住宅节点地址，密码已替换成 ***。
 	ClaudeProxy string `json:"claudeProxy"`
 	// ClaudeNode 是住宅节点地址的各项，桌面版用来预填表单；地址无效或
@@ -284,6 +289,12 @@ type RouteTest struct {
 type CustomRule struct {
 	Domain string `json:"domain"`
 	Target string `json:"target"`
+}
+
+// ProxyCredentials 是局域网代理认证的用户名和密码，给其他设备配置代理时用。
+type ProxyCredentials struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
 }
 
 type Rules struct {
