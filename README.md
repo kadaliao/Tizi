@@ -2,10 +2,10 @@
 
 填好机场订阅，点「连接」：国内网站直连，海外网站走代理，不用自己写规则。基于 [Mihomo](https://github.com/MetaCubeX/mihomo)，支持 macOS 和 Ubuntu。
 
-<!-- demo-video -->
-
 <p align="center">
-  <img src="docs/images/desktop-setup.png" width="340" alt="Tizi 桌面版：首次设置">
+  <a href="https://github.com/kadaliao/Tizi/releases/download/v1.0.0/Tizi-demo.mp4">
+    <img src="docs/images/demo-poster.jpg" width="720" alt="Tizi 演示视频（44 秒）">
+  </a>
 </p>
 
 ## 功能
