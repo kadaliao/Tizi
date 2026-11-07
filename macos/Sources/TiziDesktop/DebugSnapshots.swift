@@ -10,6 +10,14 @@ enum DebugSnapshots {
         guard let directory = ProcessInfo.processInfo.environment["TIZI_SNAPSHOT_DIR"] else { return }
         let names = ProcessInfo.processInfo.environment["TIZI_SNAPSHOT_PAGES"]
             .map { $0.split(separator: ",").map(String.init) } ?? ["simple"] + Page.allCases.map(\.rawValue)
+        let environment = ProcessInfo.processInfo.environment
+        // TIZI_SNAPSHOT_APPEARANCE=light|dark 固定外观；TIZI_SNAPSHOT_HEIGHT 拉高主窗口，截到长页面的下半部分。
+        switch environment["TIZI_SNAPSHOT_APPEARANCE"] {
+        case "light"?: NSApp.appearance = NSAppearance(named: .aqua)
+        case "dark"?: NSApp.appearance = NSAppearance(named: .darkAqua)
+        default: break
+        }
+        let height = environment["TIZI_SNAPSHOT_HEIGHT"].flatMap { Double($0) }
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 4_000_000_000)
             for name in names {
@@ -32,7 +40,24 @@ enum DebugSnapshots {
                 } else {
                     continue
                 }
-                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                if let height, AppModel.shared.mode == .advanced,
+                   let window = NSApp.windows.first(where: { $0.isVisible && $0.frame.width > 300 && $0 !== ClaudeAlertWindow.shared.debugWindow }) {
+                    var frame = window.frame
+                    frame.origin.y += frame.height - height
+                    frame.size.height = height
+                    window.setFrame(frame, display: true)
+                }
+                // TIZI_SNAPSHOT_SCROLL=0…1 把页面里最长的滚动区域滚到对应位置。
+                if let fraction = environment["TIZI_SNAPSHOT_SCROLL"].flatMap({ Double($0) }),
+                   let root = NSApp.windows.first(where: { $0.isVisible && $0.frame.width > 300 })?.contentView,
+                   let scroll = scrollViews(in: root).max(by: { ($0.documentView?.frame.height ?? 0) < ($1.documentView?.frame.height ?? 0) }),
+                   let document = scroll.documentView {
+                    let y = max(0, document.frame.height - scroll.contentView.bounds.height) * fraction
+                    scroll.contentView.scroll(to: NSPoint(x: 0, y: y))
+                    scroll.reflectScrolledClipView(scroll.contentView)
+                }
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
                 capture(to: URL(fileURLWithPath: directory).appendingPathComponent("\(name).png"))
             }
             if ProcessInfo.processInfo.environment["TIZI_SNAPSHOT_QUIT"] == "1" {
@@ -40,6 +65,13 @@ enum DebugSnapshots {
                 exit(0)
             }
         }
+    }
+
+    static func scrollViews(in view: NSView) -> [NSScrollView] {
+        var found: [NSScrollView] = []
+        if let scroll = view as? NSScrollView { found.append(scroll) }
+        for subview in view.subviews { found += scrollViews(in: subview) }
+        return found
     }
 
     static func capture(to url: URL) {

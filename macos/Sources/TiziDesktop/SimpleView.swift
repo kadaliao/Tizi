@@ -89,6 +89,7 @@ struct SimpleView: View {
         }
         .menuStyle(.borderlessButton)
         .buttonStyle(.borderless)
+        .tint(.secondary)
         .font(.callout)
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
@@ -151,11 +152,10 @@ private struct SetupPanel: View {
     var body: some View {
         VStack(spacing: 12) {
             Spacer(minLength: 4)
-            Image(systemName: "link.badge.plus")
-                .font(.system(size: 40))
-                .foregroundStyle(Color.accentColor)
+            LadderMark(phase: .off, size: 76)
             Text("先添加代理节点")
-                .font(.title2.weight(.semibold))
+                .font(.system(size: 22, weight: .semibold))
+                .padding(.top, 4)
             Text("粘贴机场给你的订阅地址，只需要设置一次。")
                 .font(.callout)
                 .foregroundStyle(.secondary)
@@ -166,12 +166,9 @@ private struct SetupPanel: View {
                 .textFieldStyle(.roundedBorder)
                 .onSubmit(save)
                 .padding(.top, 4)
-            Button(action: save) {
-                Text("保存").frame(width: 120)
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .keyboardShortcut(.defaultAction)
+            Button("保存", action: save)
+                .buttonStyle(CapsuleButtonStyle(prominent: true, width: 140))
+                .keyboardShortcut(.defaultAction)
             .disabled(saving || trimmed.isEmpty)
 
             HStack(spacing: 8) {
@@ -215,7 +212,8 @@ private struct SetupPanel: View {
             }
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
-            .foregroundStyle(Color.accentColor)
+            .foregroundStyle(Color(nsColor: .linkColor))
+            .tint(Color(nsColor: .linkColor))
             .fixedSize()
         }
     }
@@ -315,82 +313,94 @@ private struct ConnectPanel: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Spacer(minLength: 16)
-            StatusBadge(running: running, busy: busy)
+            Spacer(minLength: 12)
+            LadderMark(phase: busy ? .connecting : (running ? .on : .off), size: 128)
             Text(model.statusTitle)
-                .font(.title.weight(.semibold))
+                .font(.system(size: 26, weight: .semibold))
+                .padding(.top, 22)
+            subtitle
+                .padding(.top, 8)
+            mainButton
+                .disabled(busy)
+                .padding(.top, 22)
+            detail
+                .frame(height: 72, alignment: .top)
                 .padding(.top, 18)
-            Text(subtitle)
+            Spacer(minLength: 8)
+            banners
+        }
+        .padding(.horizontal, 22)
+        .padding(.vertical, 16)
+    }
+
+    /// 操作进行中给出提示；平时列出已设置的线路，每种线路一个彩色标签。
+    @ViewBuilder
+    private var subtitle: some View {
+        if let hint = busyHint {
+            Text(hint)
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 290)
                 .fixedSize(horizontal: false, vertical: true)
-                .padding(.top, 6)
-            mainButton
-                .controlSize(.large)
-                .disabled(busy)
-                .padding(.top, 22)
-            detail
-                .frame(height: 34)
-                .padding(.top, 12)
-            Spacer(minLength: 8)
-            banners
+        } else if snapshot.settings.routeChips.isEmpty {
+            Text(running ? "可以正常上网了" : "点「连接」开始使用")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        } else {
+            FlowLayout(spacing: 6, alignment: .center) {
+                ForEach(snapshot.settings.routeChips, id: \.title) { chip in
+                    RoutePill(chip.title, kind: chip.kind)
+                }
+            }
+            .font(.callout)
+            .frame(maxWidth: 320)
+            .opacity(running ? 1 : 0.75)
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 16)
     }
 
-    private var subtitle: String {
+    private var busyHint: String? {
         switch model.busyLabel {
         case "启动 Mihomo"?: return "如果弹出密码框，请输入这台 Mac 的登录密码"
         case "安装 Mihomo 核心"?: return "第一次使用需要下载必要组件，请稍候"
         case .some: return "请稍候"
-        case nil:
-            let routes = snapshot.settings.routeSummary.joined(separator: " · ")
-            if routes.isEmpty { return running ? "可以正常上网了" : "点「连接」开始使用" }
-            return running ? "正在使用：\(routes)" : "已设置：\(routes)"
+        case nil: return nil
         }
     }
 
     @ViewBuilder
     private var mainButton: some View {
         if running {
-            Button { Task { await model.stop() } } label: { buttonLabel("断开") }
-                .buttonStyle(.bordered)
+            Button { Task { await model.stop() } } label: { Text("断开") }
+                .buttonStyle(CapsuleButtonStyle(prominent: false))
         } else {
             // 回车只用来连接；断开保持普通按钮，避免误触。
-            Button { Task { await model.start() } } label: { buttonLabel("连接") }
-                .buttonStyle(.borderedProminent)
+            Button { Task { await model.start() } } label: { Text("连接") }
+                .buttonStyle(CapsuleButtonStyle(prominent: true))
                 .keyboardShortcut(.defaultAction)
         }
     }
 
-    private func buttonLabel(_ title: String) -> some View {
-        Text(title)
-            .font(.title3.weight(.medium))
-            .frame(width: 150)
-            .padding(.vertical, 3)
-    }
-
-    /// 下载组件时显示进度，已连接时显示实时网速。
+    /// 下载组件时显示进度，已连接时显示实时网速和流量走向。
     @ViewBuilder
     private var detail: some View {
         if let install = model.install ?? snapshot.install {
-            if let fraction = install.fraction {
-                ProgressView(value: fraction)
-                    .frame(width: 200)
-            } else {
-                ProgressView().controlSize(.small)
+            VStack(spacing: 6) {
+                if let fraction = install.fraction {
+                    ProgressView(value: fraction)
+                        .frame(width: 200)
+                } else {
+                    ProgressView().controlSize(.small)
+                }
+                Text(install.label).font(.caption).foregroundStyle(.secondary)
             }
         } else if running {
-            HStack(spacing: 18) {
-                Label(Format.rate(snapshot.traffic.download), systemImage: "arrow.down")
-                Label(Format.rate(snapshot.traffic.upload), systemImage: "arrow.up")
+            VStack(spacing: 12) {
+                SpeedReadout(download: snapshot.traffic.download, upload: snapshot.traffic.upload, size: 19)
+                RouteMix(connections: snapshot.connections, showCounts: false)
+                    .frame(width: 300)
+                    .help("当前连接分别走哪条路线")
             }
-            .font(.callout.monospacedDigit())
-            .foregroundStyle(.secondary)
-            .help("当前下载和上传速度")
         }
     }
 
@@ -442,31 +452,5 @@ private struct ConnectPanel: View {
             }
         }
         .font(.callout)
-    }
-}
-
-private struct StatusBadge: View {
-    let running: Bool
-    let busy: Bool
-
-    var body: some View {
-        let tint: Color = running ? .green : .secondary
-        ZStack {
-            Circle()
-                .fill(tint.opacity(0.10))
-                .frame(width: 124, height: 124)
-            Circle()
-                .fill(tint.opacity(0.16))
-                .frame(width: 92, height: 92)
-            if busy {
-                ProgressView()
-                    .controlSize(.large)
-            } else {
-                Image(systemName: running ? "checkmark.shield.fill" : "shield.slash")
-                    .font(.system(size: 44))
-                    .foregroundStyle(tint)
-            }
-        }
-        .accessibilityHidden(true)
     }
 }

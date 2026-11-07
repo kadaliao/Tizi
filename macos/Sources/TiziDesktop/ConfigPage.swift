@@ -30,9 +30,7 @@ struct ConfigPage: View {
                     model.updateSettings(["allowLAN": value]) { $0.allowLAN = value }
                 })
                 if settings.allowLAN {
-                    Text("会向局域网开放没有密码保护的代理端口，只应在可信网络中使用。")
-                        .font(.callout)
-                        .foregroundStyle(.orange)
+                    ProxyAuthRows(settings: settings)
                 }
                 Picker("国内流量", selection: binding(settings.chinaDirect) { value in
                     model.updateSettings(["chinaDirect": value]) { $0.chinaDirect = value }
@@ -41,14 +39,14 @@ struct ConfigPage: View {
                     Text("经外网代理").tag(false)
                 }
             } header: {
-                Text("网络")
+                SectionTitle(title: "网络", symbol: "network", color: .indigo)
             } footer: {
-                FormNote("关闭 TUN 后只提供本地代理端口，需要在应用或系统中手动设置代理。国内网站一般直连更快。")
+                FormNote("关闭 TUN 后只提供本地代理端口，需要在应用或系统里手动设置代理。国内网站直连更快。")
             }
 
             ClaudeSection(settings: settings)
 
-            Section("端口") {
+            Section {
                 PortField(label: "Mixed 代理", value: settings.mixedPort) { port in
                     model.updateSettings(["mixedPort": port]) { $0.mixedPort = port }
                 }
@@ -58,6 +56,8 @@ struct ConfigPage: View {
                 PortField(label: "DNS", value: settings.dnsPort) { port in
                     model.updateSettings(["dnsPort": port]) { $0.dnsPort = port }
                 }
+            } header: {
+                SectionTitle(title: "端口", symbol: "number", color: Color(nsColor: .systemGray))
             }
 
             Section {
@@ -68,7 +68,7 @@ struct ConfigPage: View {
                     Text("Alpha（测试尚未进入稳定版的修复）").tag("alpha")
                 }
             } header: {
-                Text("Mihomo 核心")
+                SectionTitle(title: "Mihomo 核心", symbol: "shippingbox.fill", color: .brown)
             } footer: {
                 FormNote("切换通道后，在「状态」中更新核心才会生效。")
             }
@@ -158,9 +158,9 @@ private struct ProxyNodesSection: View {
                 Text(error).font(.callout).foregroundStyle(.orange)
             }
         } header: {
-            Text("代理节点")
+            SectionTitle(title: "代理节点", symbol: RouteKind.proxy.symbol, color: RouteKind.proxy.color)
         } footer: {
-            FormNote("有机场订阅时填订阅地址即可；自己的节点（分享链接或 Mihomo 节点格式）写进 proxies.yaml。两者的节点都会出现在「自动选择」和「外网代理」里。修改后重载 Mihomo 生效。")
+            FormNote("有机场订阅时填订阅地址即可；自己的节点写进 proxies.yaml。两者都会出现在「自动选择」和「外网代理」里。")
         }
     }
 
@@ -261,7 +261,7 @@ private struct IntranetSection: View {
                 }
             }
         } header: {
-            Text("内网（可选）")
+            SectionTitle(title: "内网（可选）", symbol: RouteKind.intranet.symbol, color: RouteKind.intranet.color)
         } footer: {
             FormNote(settings.hasOVPN
                      ? "内网域名和网段经「内网」访问；留空的项自动使用 .ovpn 里的设置，多个值用逗号或空格分隔。填了内网 HTTP 出口时，「外网代理」里多一个经内网上网的选项。.ovpn 文件包含个人证书和私钥，不要发送给别人。"
@@ -346,9 +346,9 @@ private struct TailscaleSection: View {
                 }
             }
         } header: {
-            Text("Tailscale（可选）")
+            SectionTitle(title: "Tailscale（可选）", symbol: RouteKind.tailscale.symbol, color: RouteKind.tailscale.color)
         } footer: {
-            FormNote("开启后可以访问 tailnet 里的设备（100.64.0.0/10 地址和 *.ts.net 域名）。登录状态保存在配置目录，登录后不再需要 Auth Key。设置出口节点后，「外网代理」里多一个 tailscale 选项。修改后重载 Mihomo 生效。")
+            FormNote("开启后可以访问 tailnet 里的设备（100.64.0.0/10 和 *.ts.net）。登录一次后不再需要 Auth Key；设置出口节点后，「外网代理」里多一个 tailscale 选项。")
         }
     }
 
@@ -532,7 +532,7 @@ private struct ClaudeSection: View {
                     .disabled(!(settings.claudeGuardActive ?? false))
             }
         } header: {
-            Text("Claude")
+            SectionTitle(title: "Claude", symbol: RouteKind.claude.symbol, color: RouteKind.claude.color)
         } footer: {
             FormNote("""
             claude.ai、anthropic.com 等域名固定走「Claude」策略组，不会直连。配置住宅节点后经住宅节点访问，节点不可用时 Claude 打不开并弹窗提醒，不会自动换成其他节点。\
@@ -698,6 +698,71 @@ private struct NodeDraft {
             self.username = username
             password = node.password ?? ""
             replacesPassword = true
+        }
+    }
+}
+
+/// 局域网代理认证：开启后其他设备连代理端口需要用户名和密码。密码由引擎
+/// 生成并保存，界面只在点「显示」或「复制」时取一次。
+private struct ProxyAuthRows: View {
+    @EnvironmentObject private var model: AppModel
+    let settings: EngineSettings
+
+    @State private var password: String?
+
+    var body: some View {
+        Toggle("要求用户名和密码", isOn: Binding(get: { settings.proxyAuth }, set: { enabled in
+            password = nil
+            if enabled {
+                let username = settings.proxyUsername.isEmpty ? "tizi" : settings.proxyUsername
+                model.updateSettings(["proxyAuth": true, "proxyUsername": username]) {
+                    $0.proxyAuth = true
+                    $0.proxyUsername = username
+                }
+            } else {
+                model.updateSettings(["proxyAuth": false]) {
+                    $0.proxyAuth = false
+                    $0.proxyUsername = ""
+                }
+            }
+        }))
+        if settings.proxyAuth {
+            SettingField(label: "用户名", value: settings.proxyUsername, prompt: "不能含冒号或空格") { value in
+                model.updateSettings(["proxyUsername": value]) { $0.proxyUsername = value }
+            }
+            LabeledContent("密码") {
+                HStack(spacing: 8) {
+                    Text(password ?? "••••••••••••")
+                        .font(.callout.monospaced())
+                        .textSelection(.enabled)
+                        .lineLimit(1)
+                    Button(password == nil ? "显示" : "隐藏") {
+                        if password == nil {
+                            Task { password = await model.proxyCredentials()?.password }
+                        } else {
+                            password = nil
+                        }
+                    }
+                    Button("复制") {
+                        Task {
+                            guard let credentials = await model.proxyCredentials() else { return }
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(credentials.password, forType: .string)
+                            model.show("密码已复制")
+                        }
+                    }
+                    Button("重新生成") {
+                        password = nil
+                        model.updateSettings(["proxyPassword": ""])
+                    }
+                    .help("生成新密码；已经配置过的设备需要改用新密码")
+                }
+            }
+        } else {
+            Text("局域网里的任何设备都能使用这个代理端口，只应在可信网络中打开；在有公网地址的电脑上请开启「要求用户名和密码」。")
+                .font(.callout)
+                .foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }

@@ -10,43 +10,59 @@ struct ConnectionsPage: View {
         if let snapshot = model.snapshot, snapshot.controllerOnline {
             let rows = filtered(snapshot.connections).sorted(using: sortOrder)
             VStack(spacing: 0) {
-                HStack {
-                    Text(summary(snapshot, shown: rows.count))
-                        .font(.callout.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                    Spacer()
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(alignment: .firstTextBaseline, spacing: 20) {
+                        SpeedReadout(download: snapshot.traffic.download, upload: snapshot.traffic.upload, size: 17)
+                        Text(count(snapshot, shown: rows.count))
+                            .font(.callout.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text("每 2 秒刷新")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
+                    RouteMix(connections: snapshot.connections, legendAlignment: .leading)
                 }
                 .padding(.horizontal, 16)
-                .padding(.vertical, 8)
+                .padding(.vertical, 12)
+                Divider()
                 Table(rows, sortOrder: $sortOrder) {
                     TableColumn("目标", value: \.destination) { connection in
                         Text(connection.destination).help(connection.destination)
                     }
                     .width(min: 140, ideal: 220)
                     TableColumn("路线", value: \.routeText) { connection in
-                        Text(connection.routeText).help(connection.routeText)
+                        HStack {
+                            RoutePill(connection.routeText.isEmpty ? connection.ruleText : connection.routeText)
+                                .font(.callout)
+                            Spacer(minLength: 0)
+                        }
                     }
-                    .width(min: 90, ideal: 170)
+                    .width(min: 110, ideal: 190)
                     TableColumn("↓ 速度", value: \.downloadRate) { connection in
-                        Text(connection.sampled ? Format.rate(connection.downloadRate) : "—")
-                            .monospacedDigit()
+                        RateText(rate: connection.downloadRate, sampled: connection.sampled)
                     }
                     .width(min: 72, ideal: 84)
                     TableColumn("↑ 速度", value: \.uploadRate) { connection in
-                        Text(connection.sampled ? Format.rate(connection.uploadRate) : "—")
-                            .monospacedDigit()
+                        RateText(rate: connection.uploadRate, sampled: connection.sampled)
                     }
                     .width(min: 72, ideal: 84)
                     TableColumn("规则", value: \.ruleText) { connection in
-                        Text(connection.ruleText).help(connection.ruleText)
+                        Text(connection.ruleText)
+                            .foregroundStyle(.secondary)
+                            .help(connection.ruleText)
                     }
-                    .width(min: 70, ideal: 130)
+                    .width(min: 70, ideal: 120)
                     TableColumn("已下载", value: \.download) { connection in
-                        Text(Format.bytes(connection.download)).monospacedDigit()
+                        Text(Format.bytes(connection.download))
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
                     }
                     .width(min: 60, ideal: 72)
-                    TableColumn("进程", value: \.processName)
-                        .width(min: 50, ideal: 80)
+                    TableColumn("进程", value: \.processName) { connection in
+                        Text(connection.processName).foregroundStyle(.secondary)
+                    }
+                    .width(min: 50, ideal: 90)
                 }
                 .contextMenu(forSelectionType: Connection.ID.self) { selection in
                     Button("复制目标") {
@@ -59,15 +75,14 @@ struct ConnectionsPage: View {
             }
             .searchable(text: $query, prompt: "筛选目标、进程、规则或路线")
         } else {
-            Placeholder(title: "Controller 当前不可访问", symbol: "network.slash",
-                        detail: "连接后可以在这里查看活动连接和实时网速。")
+            Placeholder(title: "还没有连接", symbol: "network.slash",
+                        detail: "连接后可以在这里查看每条连接走哪条路线、实时网速多少。")
         }
     }
 
-    private func summary(_ snapshot: Snapshot, shown: Int) -> String {
+    private func count(_ snapshot: Snapshot, shown: Int) -> String {
         let total = snapshot.connections.count
-        let count = shown == total ? "\(total) 条连接" : "\(shown) / \(total) 条连接"
-        return "\(count) · ↓ \(Format.rate(snapshot.traffic.download))  ↑ \(Format.rate(snapshot.traffic.upload)) · 每 2 秒刷新"
+        return shown == total ? "\(total) 条连接" : "显示 \(shown) 条，共 \(total) 条"
     }
 
     private func filtered(_ connections: [Connection]) -> [Connection] {
@@ -77,5 +92,17 @@ struct ConnectionsPage: View {
             [connection.destination, connection.processName, connection.ruleText, connection.routeText]
                 .contains { $0.lowercased().contains(needle) }
         }
+    }
+}
+
+/// 实时速度：没有流量时淡化，有流量的连接一眼可见。
+private struct RateText: View {
+    let rate: Double
+    let sampled: Bool
+
+    var body: some View {
+        Text(sampled ? Format.rate(rate) : "—")
+            .monospacedDigit()
+            .foregroundStyle(sampled && rate >= 1 ? .primary : .tertiary)
     }
 }

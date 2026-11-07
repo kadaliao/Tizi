@@ -22,6 +22,7 @@ struct RootView: View {
                     .frame(minWidth: 760, minHeight: 520)
             }
         }
+        .tint(.brand)
         .background(WindowReader(window: $window))
         .onChange(of: model.mode) { mode in resize(for: mode) }
         .confirmationDialog(conflictTitle, isPresented: $model.conflictPrompt, titleVisibility: .visible) {

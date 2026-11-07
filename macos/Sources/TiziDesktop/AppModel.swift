@@ -841,6 +841,16 @@ final class AppModel: ObservableObject {
         Task { _ = try? await client.call("shareStop", as: ActionResult.self) }
     }
 
+    /// 局域网代理认证的用户名和密码，给其他设备配置代理时显示或复制。
+    func proxyCredentials() async -> ProxyCredentials? {
+        do {
+            return try await client.call("proxyCredentials")
+        } catch {
+            show(error.localizedDescription, error: true)
+            return nil
+        }
+    }
+
     func openDashboard() async {
         do {
             let url: String = try await client.call("dashboardURL")

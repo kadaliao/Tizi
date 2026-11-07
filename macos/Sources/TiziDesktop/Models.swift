@@ -117,6 +117,11 @@ struct EngineSettings: Decodable, Equatable {
 
     var tunEnabled: Bool
     var allowLAN: Bool
+    /// 局域网代理认证的用户名；proxyAuth 表示用户名和密码都设置了。密码不随
+    /// 快照推送，需要时用 proxyCredentials 取。旧引擎没有这些字段。
+    var proxyUsername: String
+    var proxyAuth: Bool
+    var hasProxyPassword: Bool
     var chinaDirect: Bool
     var mixedPort: Int
     var controllerPort: Int
@@ -141,7 +146,8 @@ struct EngineSettings: Decodable, Equatable {
         case ovpnPath, remote, intranetDomains, intranetCIDRs, intranetDNS, intranetHTTPProxy, intranetProbeURL, intranet
         case tailscaleEnabled, tailscaleAuthKey, tailscaleHasAuthKey, tailscaleLoggedIn, tailscaleHostname
         case tailscaleDeviceName, tailscaleControlURL, tailscaleExitNode
-        case tunEnabled, allowLAN, chinaDirect, mixedPort, controllerPort, dnsPort, coreChannel
+        case tunEnabled, allowLAN, proxyUsername, proxyAuth, hasProxyPassword
+        case chinaDirect, mixedPort, controllerPort, dnsPort, coreChannel
         case claudeProxy, claudeNode, claudeProxyInFile, claudeProxyError, claudeProxyDirect
         case claudeGuard, claudeGuardActive, claudeBlock, claudeBlockSupported
     }
@@ -172,6 +178,9 @@ struct EngineSettings: Decodable, Equatable {
         tailscaleExitNode = try c.decodeIfPresent(String.self, forKey: .tailscaleExitNode) ?? ""
         tunEnabled = try c.decode(Bool.self, forKey: .tunEnabled)
         allowLAN = try c.decode(Bool.self, forKey: .allowLAN)
+        proxyUsername = try c.decodeIfPresent(String.self, forKey: .proxyUsername) ?? ""
+        proxyAuth = try c.decodeIfPresent(Bool.self, forKey: .proxyAuth) ?? false
+        hasProxyPassword = try c.decodeIfPresent(Bool.self, forKey: .hasProxyPassword) ?? false
         chinaDirect = try c.decode(Bool.self, forKey: .chinaDirect)
         mixedPort = try c.decode(Int.self, forKey: .mixedPort)
         controllerPort = try c.decode(Int.self, forKey: .controllerPort)
@@ -369,6 +378,11 @@ struct CustomRule: Decodable, Identifiable {
     var id: String { domain }
 }
 
+struct ProxyCredentials: Decodable {
+    var username: String
+    var password: String
+}
+
 struct Rules: Decodable {
     var rules: [CustomRule]
     var targets: [String]
@@ -383,6 +397,13 @@ enum Format {
         case kib...: return String(format: "%.1f KiB/s", bytesPerSecond / kib)
         default: return String(format: "%.0f B/s", bytesPerSecond)
         }
+    }
+
+    /// 拆成数字和单位，界面里数字大、单位小。
+    static func rateParts(_ bytesPerSecond: Double) -> (number: String, unit: String) {
+        let text = rate(bytesPerSecond)
+        guard let space = text.lastIndex(of: " ") else { return (text, "") }
+        return (String(text[..<space]), String(text[text.index(after: space)...]))
     }
 
     static func bytes(_ count: Int64) -> String {

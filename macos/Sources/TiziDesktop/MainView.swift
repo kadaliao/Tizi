@@ -7,8 +7,13 @@ struct MainView: View {
     var body: some View {
         NavigationSplitView {
             List(Page.allCases, selection: pageSelection) { page in
-                Label(page.title, systemImage: page.symbol)
-                    .tag(page)
+                Label {
+                    Text(page.title)
+                } icon: {
+                    IconBadge(symbol: page.symbol, color: page.tint, size: 20)
+                }
+                .padding(.vertical, 2)
+                .tag(page)
             }
             .navigationSplitViewColumnWidth(min: 150, ideal: 170, max: 220)
             .safeAreaInset(edge: .bottom) { SidebarStatus() }
@@ -51,20 +56,25 @@ private struct SidebarStatus: View {
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Label(model.statusTitle, systemImage: model.menuBarSymbol)
-                .font(.callout.weight(.medium))
-                .foregroundStyle(model.running ? Color.green : Color.secondary)
-                .lineLimit(1)
-            if let traffic = model.snapshot?.traffic, model.running {
-                Text("↓ \(Format.rate(traffic.download))  ↑ \(Format.rate(traffic.upload))")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                LadderMark(phase: model.busyLabel != nil ? .connecting : (model.running ? .on : .off), size: 30)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(model.statusTitle)
+                        .font(.callout.weight(.semibold))
+                        .lineLimit(1)
+                    if let traffic = model.snapshot?.traffic, model.running {
+                        Text("↓ \(Format.rate(traffic.download))  ↑ \(Format.rate(traffic.upload))")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.7)
+                    }
+                }
             }
             Button("切换到简洁模式") { model.mode = .simple }
                 .buttonStyle(.link)
                 .font(.caption)
-                .padding(.top, 4)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
@@ -205,5 +215,20 @@ struct Placeholder: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(32)
+    }
+}
+
+extension Page {
+    /// 侧栏图标块的颜色，和各页内容里的主色一致。
+    var tint: Color {
+        switch self {
+        case .status: return .brand
+        case .config: return Color(nsColor: .systemGray)
+        case .policy: return .blue
+        case .rules: return .orange
+        case .connections: return .teal
+        case .logs: return .indigo
+        case .diagnostics: return .pink
+        }
     }
 }
