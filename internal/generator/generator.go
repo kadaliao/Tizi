@@ -729,8 +729,9 @@ func rules(p plan) []string {
 	for _, domain := range config.CloudInternalDomains {
 		builtin = append(builtin, "DOMAIN-SUFFIX,"+domain+",DIRECT")
 	}
+	// 没有按端口放行直连的规则：http:// 和 https:// 按同样的规则分流，
+	// 海外网站的 http 地址也走代理，否则多半打不开。
 	tail := []string{
-		"AND,((NETWORK,TCP),(DST-PORT,80)),DIRECT",
 		"IP-CIDR,127.0.0.0/8,DIRECT,no-resolve",
 		"IP-CIDR,10.0.0.0/8,DIRECT,no-resolve",
 		"IP-CIDR,172.16.0.0/12,DIRECT,no-resolve",

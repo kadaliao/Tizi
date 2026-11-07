@@ -175,8 +175,11 @@ func TestRulesRoutePublicTrafficByGeoIP(t *testing.T) {
 	if !contains(got, "AND,((NETWORK,TCP),(DST-PORT,5223),(IP-CIDR,17.0.0.0/8)),DIRECT") {
 		t.Error("APNs direct exception missing")
 	}
-	if !contains(got, "AND,((NETWORK,TCP),(DST-PORT,80)),DIRECT") {
-		t.Error("HTTP direct exception missing")
+	// 海外网站的 http:// 地址也要走代理，不能按 80 端口一律直连。
+	for _, rule := range got {
+		if strings.Contains(rule, "(DST-PORT,80)") {
+			t.Errorf("plain HTTP must follow the normal routing: %s", rule)
+		}
 	}
 }
 
