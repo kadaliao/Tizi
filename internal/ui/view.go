@@ -8,10 +8,13 @@ import (
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/kadaliao/tizi/internal/claude"
+	"github.com/kadaliao/tizi/internal/claudeguard"
 	"github.com/kadaliao/tizi/internal/configshare"
 	"github.com/kadaliao/tizi/internal/controller"
 	"github.com/kadaliao/tizi/internal/core"
 	"github.com/kadaliao/tizi/internal/diagnostics"
+	"github.com/kadaliao/tizi/internal/generator"
 	"github.com/kadaliao/tizi/internal/nodes"
 )
 
@@ -131,14 +134,122 @@ func (m Model) header(width int) string {
 	return brand + "\n" + lipgloss.NewStyle().Foreground(borderColor).Render(strings.Repeat("─", max(1, width-4))) + "\n" + tabsLine
 }
 
+// statusViewChrome 是状态页面板内容之外的行数：外层 padding、页眉、消息行、
+// 页脚和面板自身的边框、padding 与标题。
+const statusViewChrome = 16
+
+// minStatusDetails 是窗口再矮也要显示的状态行数。
+const minStatusDetails = 3
+
 func (m Model) statusView(width int) string {
+	contentWidth := width - panelChrome
+	valueWidth := contentWidth - labelColWidth - 1
+	details := m.statusDetails(valueWidth)
+	actions := m.statusActions()
+	cursor := m.cursor
+	if cursor >= len(actions) {
+		cursor = 0
+	}
+	// 操作不截断：窄终端里折行显示，「启动前必需」之类的说明不能丢。
+	actionRows := make([]string, 0, len(actions))
+	actionLines := 0
+	for i, action := range actions {
+		disabled := m.busy || (action.id == statusClaudeCheck && m.claudeChecking)
+		actionRows = append(actionRows, selectable(i == cursor, action.label, disabled))
+		actionLines += (lipgloss.Width(action.label) + 2 + contentWidth - 1) / max(1, contentWidth)
+	}
+
+	// 窗口太矮时先省略 Claude 告警的说明，再省略排在后面的状态行，保证
+	// 操作始终可见。
+	notices := m.statusNotices(contentWidth, false)
+	if m.height > 0 && m.height-statusViewChrome-actionLines-2-len(notices)-1 < len(details) {
+		notices = m.statusNotices(contentWidth, true)
+	}
+	fixed := actionLines + 2
+	if len(notices) > 0 {
+		fixed += len(notices) + 1
+	}
+	if m.height > 0 {
+		available := m.height - statusViewChrome - fixed
+		if available < len(details) {
+			keep := max(minStatusDetails, available-1)
+			if keep < len(details) {
+				hidden := len(details) - keep
+				details = append(details[:keep:keep], dimStyle.Render(truncate(fmt.Sprintf("（另有 %d 项状态，拉高窗口可见）", hidden), contentWidth)))
+			}
+		}
+	}
+
+	var rows []string
+	if len(notices) > 0 {
+		rows = append(rows, notices...)
+		rows = append(rows, "")
+	}
+	if !m.hasCore() {
+		rows = append(rows, titleStyle.Render("下一步"))
+		rows = append(rows, actionRows...)
+		rows = append(rows, "", titleStyle.Render("当前状态"))
+		rows = append(rows, details...)
+	} else {
+		rows = append(rows, details...)
+		rows = append(rows, "", titleStyle.Render("操作"))
+		rows = append(rows, actionRows...)
+	}
+	return panel("运行状态", strings.Join(rows, "\n"), width)
+}
+
+// statusNotices 是状态页顶部需要处理的问题，每条一行；compact 时省略
+// Claude 告警的说明。
+func (m Model) statusNotices(width int, compact bool) []string {
+	var notices []string
+	if !m.hasCore() {
+		notices = append(notices, warnStyle.Render(truncate("尚未安装 Mihomo 核心。安装到当前用户目录，不需要 sudo。", width)))
+	}
+	switch m.claude.Level {
+	case claudeguard.LevelAlert, claudeguard.LevelWarn:
+		style := warnStyle
+		if m.claude.Level == claudeguard.LevelAlert {
+			style = errorStyle
+		}
+		notices = append(notices, style.Render(truncate("Claude："+m.claude.Title, width)))
+		if m.claude.Detail != "" && !compact {
+			notices = append(notices, dimStyle.Render(truncate(m.claude.Detail, width)))
+		}
+	}
+	if m.dnsPending {
+		notices = append(notices, warnStyle.Render(truncate("上次运行遗留的系统 DNS 设置尚未恢复，选「恢复系统 DNS」修复。", width)))
+	}
+	if len(m.snapshot.vpn.Tunnelblick) > 0 {
+		notices = append(notices, warnStyle.Render(truncate("检测到 Tunnelblick。请先停止它，再由本工具独立启动 TUN。", width)))
+	}
+	return notices
+}
+
+// statusDetails 按重要程度排列状态行；窗口太矮时从后往前省略。
+func (m Model) statusDetails(valueWidth int) []string {
 	status := errorStyle.Render("已停止")
 	if m.snapshot.managed.Running {
 		status = okStyle.Render(fmt.Sprintf("运行中  PID %d", m.snapshot.managed.PID))
 	}
+	details := []string{row("受管 Mihomo", status)}
+	if m.snapshot.healthy {
+		details = append(details, row("实时网速", truncate(m.trafficText(), valueWidth)))
+	}
+	details = append(details,
+		row("Claude 监测", truncate(m.claudeStatusText(), valueWidth)),
+		row("Claude 出口", truncate(m.claudeExitText(), valueWidth)),
+		row("线路", truncate(m.routeSummary(), valueWidth)),
+		row("转发模式", boolText(m.settings.TunEnabled, "TUN 全局接管", "仅本地代理端口")),
+		row("本地代理", truncate(m.localProxyText(), valueWidth)),
+		row("国内流量", boolText(m.settings.ChinaDirect, "直连", "经外网代理")),
+		row("内网 OVPN", truncate(or(m.settings.OVPNPath, "未导入"), valueWidth)),
+	)
+	if m.settings.OVPNPath != "" {
+		details = append(details, row("Remote", truncate(or(m.settings.Remote, "全部"), valueWidth)))
+	}
 	controllerStatus := dimStyle.Render("不可访问")
 	if m.snapshot.healthy {
-		controllerStatus = okStyle.Render("在线")
+		controllerStatus = okStyle.Render(fmt.Sprintf("在线（127.0.0.1:%d）", m.settings.ControllerPort))
 	}
 	vpnStatus := okStyle.Render("无")
 	if len(m.snapshot.vpn.Tunnelblick) > 0 {
@@ -146,64 +257,121 @@ func (m Model) statusView(width int) string {
 	} else if len(m.snapshot.vpn.OpenVPN) > 0 {
 		vpnStatus = warnStyle.Render(fmt.Sprintf("检测到 OpenVPN，%d 个进程", len(m.snapshot.vpn.OpenVPN)))
 	}
-	remote := "全部"
-	if m.settings.Remote != "" {
-		remote = m.settings.Remote
-	}
 	coreVersion := m.snapshot.managed.CoreVersion
 	if coreVersion == "" {
 		coreVersion = boolText(m.hasCore(), "正在读取...", "未安装")
 	}
-	appVersion := or(m.appVersion, "dev")
-	if !m.appUpdateChecked {
-		appVersion += "（正在检查更新...）"
-	} else if m.appUpdateError != "" {
-		appVersion += "（更新检查失败）"
-	} else if m.appUpdateAvailable {
-		appVersion += "（最新 " + m.latestAppVersion + "）"
-	} else if m.appUpdated {
-		appVersion += "（已更新至 " + m.latestAppVersion + "，按 r 用新版本重启）"
-	} else {
-		appVersion += "（已是最新）"
-	}
-	valueWidth := width - panelChrome - labelColWidth - 1
-	details := []string{
-		row("APP 版本", truncate(appVersion, valueWidth)),
-		row("受管 Mihomo", status),
+	details = append(details,
+		row("Tailscale", truncate(m.tailscaleText(), valueWidth)),
 		row("Controller", controllerStatus),
 		row("VPN 冲突", vpnStatus),
 		row("Mihomo 核心", truncate(coreVersion, valueWidth)),
-		row("线路", truncate(m.routeSummary(), valueWidth)),
-		row("内网 OVPN", truncate(or(m.settings.OVPNPath, "未导入"), valueWidth)),
-		row("Remote", truncate(remote, valueWidth)),
-		row("转发模式", boolText(m.settings.TunEnabled, "TUN 全局接管", "仅本地代理端口")),
+		row("APP 版本", truncate(m.appVersionText(), valueWidth)),
+	)
+	return details
+}
+
+func (m Model) appVersionText() string {
+	text := or(m.appVersion, "dev")
+	switch {
+	case !m.appUpdateChecked:
+		return text + "（正在检查更新...）"
+	case m.appUpdateError != "":
+		return text + "（更新检查失败）"
+	case m.appUpdateAvailable:
+		return text + "（最新 " + m.latestAppVersion + "）"
+	case m.appUpdated:
+		return text + "（已更新至 " + m.latestAppVersion + "，按 r 用新版本重启）"
+	default:
+		return text + "（已是最新）"
 	}
-	actions := m.statusActions()
-	cursor := m.cursor
-	if cursor >= len(actions) {
-		cursor = 0
+}
+
+// trafficText 汇总全部活动连接的实时网速。
+func (m Model) trafficText() string {
+	var download, upload float64
+	for _, rate := range m.connectionRates {
+		download += rate.Download
+		upload += rate.Upload
 	}
-	rows := details
-	if !m.hasCore() {
-		rows = []string{
-			warnStyle.Render("尚未安装 Mihomo 核心。安装到当前用户目录，不需要 sudo。"),
-			"",
-			titleStyle.Render("下一步"),
+	return fmt.Sprintf("↓ %s  ↑ %s · %d 条连接", formatByteRate(download), formatByteRate(upload), len(m.snapshot.connections))
+}
+
+// localProxyText 说明本地代理端口，以及局域网设备连接时是否要求认证。
+func (m Model) localProxyText() string {
+	host := "127.0.0.1"
+	if m.settings.AllowLAN {
+		host = "0.0.0.0"
+	}
+	text := fmt.Sprintf("%s:%d（HTTP/SOCKS5）", host, m.settings.MixedPort)
+	if m.settings.AllowLAN {
+		text += boolText(m.settings.ProxyAuthEnabled(), " · 局域网需要用户名和密码", " · 局域网不要求认证")
+	}
+	return text
+}
+
+func (m Model) tailscaleText() string {
+	if !m.settings.TailscaleEnabled {
+		return "关闭"
+	}
+	text := "开启（设备名 " + generator.TailscaleHostname(m.settings) + "）"
+	if !tailscaleLoggedIn(m) && m.settings.TailscaleAuthKey == "" {
+		text += " · 首次登录需要 Auth Key"
+	}
+	return text
+}
+
+// claudeExitText 说明 Claude 走哪类出口，以及最近一次检测看到的出口 IP。
+func (m Model) claudeExitText() string {
+	text := "代理节点"
+	if claude.Configured(m.paths.ConfigDir, m.settings) {
+		text = "住宅节点（经前置代理链式连接）"
+		if m.settings.ClaudeProxyDirect || localClaudeNode(m) || !claude.Chainable(m.paths.ConfigDir, m.settings) {
+			text = "住宅节点（直接连接）"
 		}
-	} else {
-		rows = append(rows, "", titleStyle.Render("操作"))
 	}
-	for i, action := range actions {
-		rows = append(rows, selectable(i == cursor, action.label, m.busy))
+	if ip := m.claude.ExitIP; ip != "" {
+		text += " · " + ip
+		if m.claude.Country != "" {
+			text += "（" + m.claude.Country + "）"
+		}
 	}
-	if !m.hasCore() {
-		rows = append(rows, "", titleStyle.Render("当前状态"))
-		rows = append(rows, details...)
+	return text
+}
+
+// claudeStatusText 是 Claude 访问监测的结论，按级别着色。
+func (m Model) claudeStatusText() string {
+	enabled := claudeguard.Enabled(m.paths.ConfigDir, m.settings)
+	if m.claude.Level == "" || (m.claude.Level == claudeguard.LevelChecking && m.claude.CheckedAt.IsZero()) {
+		switch {
+		case m.claudeChecking:
+			return dimStyle.Render("正在检测...")
+		case enabled:
+			return dimStyle.Render("等待检测")
+		default:
+			return dimStyle.Render("未开启（选「检测 Claude 线路」手动检查一次）")
+		}
 	}
-	if len(m.snapshot.vpn.Tunnelblick) > 0 {
-		rows = append(rows, "", warnStyle.Render("检测到 Tunnelblick。请先停止它，再由本工具独立启动 TUN。"))
+	style := dimStyle
+	switch m.claude.Level {
+	case claudeguard.LevelOK:
+		style = okStyle
+	case claudeguard.LevelWarn:
+		style = warnStyle
+	case claudeguard.LevelAlert:
+		style = errorStyle
 	}
-	return panel("运行状态", strings.Join(rows, "\n"), width)
+	text := m.claude.Title
+	if m.claude.Pending > 0 {
+		text += " · 正在复查"
+	}
+	if !m.claude.CheckedAt.IsZero() {
+		text += " · " + m.claude.CheckedAt.Format("15:04:05") + " 检测"
+	}
+	if !enabled {
+		text += " · 未开启自动监测"
+	}
+	return style.Render(text)
 }
 
 func (m Model) configView(width int) string {
@@ -376,7 +544,8 @@ func (m Model) rulesView(width int) string {
 		selectable(m.cursor == 0, row("测试网站", website), m.busy),
 		selectable(m.cursor == 1, "测试当前路线", m.busy || strings.TrimSpace(m.ruleInput) == ""),
 		selectable(m.cursor == 2, row("规则路线", ruleTargets[m.ruleTarget]), false),
-		selectable(m.cursor == 3, "保存域名规则", false),
+		selectable(m.cursor == ruleRowSave, "保存域名规则", false),
+		selectable(m.cursor == ruleRowReload, boolText(m.snapshot.managed.Running, "重载 Mihomo 使规则生效", "启动 Mihomo 使规则生效"), m.busy),
 	}
 	if m.ruleTested && (m.ruleMatch.Type != "" || len(m.ruleChains) > 0) {
 		route := controller.Route(m.ruleChains)
@@ -407,7 +576,7 @@ func (m Model) rulesView(width int) string {
 			rows = append(rows, truncate("DOMAIN-SUFFIX,"+rule.Domain+" -> "+rule.Target, width-panelChrome))
 		}
 	}
-	rows = append(rows, "", dimStyle.Render("Enter 编辑/测试/切换/保存  测试会建立连接但不请求网页内容；保存后重启才生效"))
+	rows = append(rows, "", dimStyle.Render("Enter 编辑/测试/切换/保存/重载  测试只建立连接，不请求网页内容"))
 	return panel("网站路线与自定义规则", strings.Join(rows, "\n"), width)
 }
 
@@ -718,7 +887,7 @@ func (m Model) confirmView(width int) string {
 		title = "更新确认"
 		text = warnStyle.Render("Mihomo 正在运行") + "\n\n" +
 			"目标通道：" + coreChannelText(m.settings.CoreChannel) + "\n" +
-			"更新核心不会中断当前进程，但新版本要重启 Mihomo 后才生效。\n\n" +
+			"更新核心不会中断当前进程，但新版本要重载 Mihomo 后才生效。\n\n" +
 			selectedStyle.Render("继续更新：y") + "    取消：n / Esc"
 	case confirmStopOpenVPN:
 		title = "结束 OpenVPN 确认"
@@ -762,11 +931,14 @@ func (m Model) shareView(width int) string {
 func (m Model) helpView(width int) string {
 	text := "1-7 或 h/l ←/→  切换视图      j/k ↑/↓  移动选择\n" +
 		"Enter/Space  执行或展开       d  打开 Web 面板\n" +
+		"状态页：启动/停止、重载 Mihomo（让设置和规则生效）、校验配置、安装或更新核心、\n" +
+		"        刷新微信直连、检测 Claude 线路、Clash Mi 扫码导入；遗留 DNS 时可恢复系统 DNS\n" +
 		"配置页：Enter 编辑或选择，Remote 和 s 扫描都是列表选择\n" +
 		"        选中 OVPN 行可直接粘贴或从文件管理器拖入\n" +
+		"        节点文件和住宅节点文件（claude-proxy.yaml）用 $EDITOR 编辑\n" +
 		"编辑中：←/→ 移动光标  Home/End 行首行尾  Tab 补全  Ctrl+U/K 删至行首/行尾\n" +
 		"策略页：Enter 展开并切换当前策略\n" +
-		"规则页：输入网址后 Enter 测试当前路线；选择路线后保存域名规则\n" +
+		"规则页：输入网址后 Enter 测试当前路线；选择路线后保存域名规则，再选「重载 Mihomo」生效\n" +
 		"连接页：实时查看目标、路线和上下行网速；/ 搜索，↑/↓ 滚动\n" +
 		"日志页：/ 搜索  Enter 完成  Esc 清空  ↑/↓ 滚动  PgUp/PgDn 翻页  g/G 顶部/末尾  o 定位文件\n" +
 		"r 刷新（APP 更新后按 r 用新版本重启）    q 退出（运行中会先确认）    ?/Esc 关闭帮助"

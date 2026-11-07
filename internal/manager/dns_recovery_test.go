@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kadaliao/tizi/internal/config"
 	"github.com/kadaliao/tizi/internal/system"
 )
 
@@ -77,5 +78,22 @@ func TestWaitLauncherExitIgnoresFailedChecks(t *testing.T) {
 	}, time.Millisecond)
 	if calls != len(sequence) {
 		t.Fatalf("应等到确认退出才返回，只检查了 %d 次", calls)
+	}
+}
+
+func TestLeftoverDNSOnlyWhenStoppedWithSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	man := Manager{Paths: config.Paths{ConfigDir: dir, DNSState: filepath.Join(dir, "dns-state.json")}}
+	if man.LeftoverDNS(false) {
+		t.Fatal("no snapshot means nothing to recover")
+	}
+	if err := os.WriteFile(man.Paths.DNSState, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !man.LeftoverDNS(false) {
+		t.Fatal("a snapshot without a running Mihomo is leftover")
+	}
+	if man.LeftoverDNS(true) {
+		t.Fatal("a running Mihomo still owns its DNS snapshot")
 	}
 }

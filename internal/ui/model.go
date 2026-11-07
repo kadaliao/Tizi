@@ -20,6 +20,7 @@ import (
 	"github.com/kadaliao/tizi/internal/appupdate"
 	"github.com/kadaliao/tizi/internal/claude"
 	"github.com/kadaliao/tizi/internal/claudeblock"
+	"github.com/kadaliao/tizi/internal/claudeguard"
 	"github.com/kadaliao/tizi/internal/config"
 	"github.com/kadaliao/tizi/internal/configshare"
 	"github.com/kadaliao/tizi/internal/controller"
@@ -66,6 +67,7 @@ const (
 	fieldProxyPassword
 	fieldChinaDirect
 	fieldClaudeProxy
+	fieldClaudeProxyFile
 	fieldClaudeProxyDirect
 	fieldClaudeGuard
 	fieldClaudeBlock
@@ -78,6 +80,8 @@ const (
 var tabs = []string{"状态", "配置", "策略", "规则", "连接", "日志", "诊断"}
 
 type snapshot struct {
+	// loaded 表示这是一次真实的刷新结果，而不是界面刚打开时的空状态。
+	loaded        bool
 	managed       manager.Status
 	vpn           system.VPNState
 	healthy       bool
@@ -89,6 +93,8 @@ type snapshot struct {
 	// 用于跳过未变化文件的重复解析。
 	profileStamp string
 	logs         []string
+	// dnsLeftover 表示 Mihomo 没在运行，上次运行的 DNS 恢复点却还在。
+	dnsLeftover bool
 }
 
 type snapshotMsg snapshot
@@ -96,6 +102,8 @@ type connectionRate = controller.Rate
 type actionMsg struct {
 	text string
 	err  error
+	// claudeReset 表示这次操作改变了 Claude 的线路，之前的检测结论作废。
+	claudeReset bool
 }
 type administratorAuthorizationMsg struct {
 	operation string
@@ -130,6 +138,12 @@ type configShareClosedMsg struct {
 	session *configshare.Session
 }
 
+// claudeMsg 是一次 Claude 线路检测的结果；manual 表示是用户手动触发的。
+type claudeMsg struct {
+	status claudeguard.Status
+	manual bool
+}
+
 type statusActionID int
 
 const (
@@ -138,6 +152,10 @@ const (
 	statusInstall
 	statusShare
 	statusUpdateApp
+	statusReload
+	statusRecoverDNS
+	statusRecoverWeChat
+	statusClaudeCheck
 )
 
 type statusAction struct {
@@ -234,7 +252,22 @@ type Model struct {
 	updatingApp        bool
 	appUpdated         bool
 	restartAfterUpdate bool
+	// claude 是最近一次 Claude 线路检测的结论；开启监测时经 claudeTracker
+	// 去抖（偶发失败先复查），没开启时只有手动检测的结果。
+	claude         claudeguard.Status
+	claudeTracker  *claudeguard.Tracker
+	claudeChecking bool
+	// claudeNext 是开启监测时下一次自动检测的时间；零值表示尽快检测。
+	claudeNext time.Time
+	// dnsPending 表示遗留的 DNS 恢复点已经持续了 dnsPendingGrace，需要提示；
+	// 在快照到达时算好，保证同一快照下渲染和按键看到的操作列表一致。
+	dnsPending      bool
+	dnsPendingSince time.Time
 }
+
+// dnsPendingGrace 是「遗留 DNS 未恢复」持续多久才提示：另一个界面启动
+// Mihomo 时会先保存 DNS 恢复点再写入 PID，中间短暂出现这种状态。
+const dnsPendingGrace = 3 * time.Second
 
 func New(paths config.Paths, settings config.Settings, version string) Model {
 	version = strings.TrimSpace(version)
@@ -308,9 +341,25 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		next := snapshot(msg)
+		var oldAction statusActionID
+		hadAction := false
+		if m.active == tabStatus {
+			if actions := m.statusActions(); m.cursor < len(actions) {
+				oldAction, hadAction = actions[m.cursor].id, true
+			}
+		}
+		previous := m.snapshot
 		m.connectionRates = calculateConnectionRates(m.snapshot, next)
 		m.snapshot = next
 		m.coreFound = next.managed.CorePath != ""
+		m.updateDNSPending(next.dnsLeftover, time.Now())
+		if previous.loaded && next.loaded && (previous.managed.Running != next.managed.Running ||
+			previous.managed.PID != next.managed.PID || previous.managed.Exited != next.managed.Exited) {
+			m.claudeRouteChanged(false)
+		}
+		if m.active == tabStatus {
+			m.cursor = m.statusCursorFor(oldAction, hadAction)
+		}
 		if m.active == tabPolicy {
 			if len(m.snapshot.groups) == 0 {
 				m.cursor, m.choice, m.choosing = 0, 0, false
@@ -401,7 +450,28 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.finish(msg.text)
 		}
+		if msg.claudeReset {
+			m.claudeRouteChanged(true)
+		}
 		return m, tea.Batch(refreshCmd(m), diagnosticsCmd(m))
+	case claudeMsg:
+		m.claudeChecking = false
+		now := time.Now()
+		if msg.manual && !claudeguard.Enabled(m.paths.ConfigDir, m.settings) {
+			// 没开启监测时只有这一次检测，直接展示结果，不必去抖。
+			m.claude = msg.status
+		} else {
+			if m.claudeTracker == nil {
+				m.claudeTracker = claudeguard.NewTracker()
+			}
+			m.claude = m.claudeTracker.Update(msg.status)
+			m.claudeTracker.Done(now)
+			m.claudeNext = now.Add(m.claudeTracker.NextDelay())
+		}
+		if msg.manual {
+			m.setMessage("Claude 线路检测完成：" + m.claude.Title)
+		}
+		return m, nil
 	case configShareMsg:
 		m.busy = false
 		if msg.err != nil {
@@ -425,6 +495,10 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.operation {
 		case "stop":
 			return m, runStopCmd(m.manager)
+		case "reload":
+			return m, runReloadCmd(m.manager, msg.settings)
+		case "recover-dns":
+			return m, runRecoverDNSCmd(m.manager)
 		case "claude-block-on", "claude-block-off":
 			return m, claudeBlockCmd(msg.operation == "claude-block-on")
 		case "stop-openvpn-and-start":
@@ -450,7 +524,12 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.spinner++
 			return m, tickCmd(true)
 		}
-		return m, tea.Batch(refreshCmd(m), tickCmd(false))
+		cmds := []tea.Cmd{refreshCmd(m), tickCmd(false)}
+		if m.claudeDue(time.Now()) {
+			m.claudeChecking = true
+			cmds = append(cmds, claudeCheckCmd(m.manager, m.settings, false))
+		}
+		return m, tea.Batch(cmds...)
 	case tea.BackgroundColorMsg:
 		applyPalette(msg.IsDark())
 		m.darkBackground = msg.IsDark()
@@ -539,6 +618,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 		m.setMessage("正在刷新...")
+		m.claudeNext = time.Time{}
 		m.appUpdateChecked = false
 		m.appUpdateError = ""
 		m.appUpdateAvailable = false
@@ -680,24 +760,23 @@ func (m Model) handleStatusKey(key string) (tea.Model, tea.Cmd) {
 	case "enter", "space":
 		m.message = ""
 		m.errorText = ""
-		m.busy = true
 		switch actions[m.cursor].id {
 		case statusStart:
 			if m.snapshot.managed.Running {
+				m.busy = true
 				return m, stopCmd(m.manager, m.snapshot.managed.Privileged)
 			}
-			if generator.CheckReady(m.paths.ConfigDir, m.settings) != nil {
-				return m.guideToSetup()
-			}
-			if core.Find(m.paths) == "" {
-				return m.selectInstall()
-			}
-			if m.settings.TunEnabled && m.snapshot.vpn.HasActiveOpenVPN() {
-				m.busy = false
-				m.confirm = confirmForceStart
-				return m, nil
-			}
-			return m, startCmd(m.manager, m.settings)
+			return m.startMihomo()
+		case statusReload:
+			return m.reloadMihomo()
+		case statusRecoverDNS:
+			m.busy = true
+			return m, recoverDNSCmd(m.manager)
+		case statusRecoverWeChat:
+			m.busy = true
+			return m, recoverWeChatCmd(m.manager)
+		case statusClaudeCheck:
+			return m.checkClaudeNow()
 		case statusValidate:
 			if generator.CheckReady(m.paths.ConfigDir, m.settings) != nil {
 				return m.guideToSetup()
@@ -705,25 +784,120 @@ func (m Model) handleStatusKey(key string) (tea.Model, tea.Cmd) {
 			if core.Find(m.paths) == "" {
 				return m.selectInstall()
 			}
+			m.busy = true
 			return m, validateCmd(m.manager, m.settings)
 		case statusInstall:
 			if m.snapshot.managed.Running {
-				m.busy = false
 				m.confirm = confirmReinstall
 				return m, nil
 			}
+			m.busy = true
 			return m, installCmd(m.paths, m.settings.CoreChannel, m.install)
 		case statusShare:
 			if generator.CheckReady(m.paths.ConfigDir, m.settings) != nil {
 				return m.guideToSetup()
 			}
+			m.busy = true
 			return m, shareConfigCmd(m.manager, m.settings)
 		case statusUpdateApp:
+			m.busy = true
 			m.updatingApp = true
 			return m, updateAppCmd(m.latestAppVersion)
 		}
 	}
 	return m, nil
+}
+
+// startMihomo 检查线路、核心和其他 OpenVPN 后启动 Mihomo。
+func (m Model) startMihomo() (tea.Model, tea.Cmd) {
+	if generator.CheckReady(m.paths.ConfigDir, m.settings) != nil {
+		return m.guideToSetup()
+	}
+	if core.Find(m.paths) == "" {
+		return m.selectInstall()
+	}
+	if m.settings.TunEnabled && m.snapshot.vpn.HasActiveOpenVPN() {
+		m.confirm = confirmForceStart
+		return m, nil
+	}
+	m.busy = true
+	return m, startCmd(m.manager, m.settings)
+}
+
+// reloadMihomo 重新生成配置并重启 Mihomo，让设置和自定义规则的修改生效；
+// 没在运行时按启动处理。
+func (m Model) reloadMihomo() (tea.Model, tea.Cmd) {
+	if !m.snapshot.managed.Running {
+		return m.startMihomo()
+	}
+	if generator.CheckReady(m.paths.ConfigDir, m.settings) != nil {
+		return m.guideToSetup()
+	}
+	if core.Find(m.paths) == "" {
+		return m.selectInstall()
+	}
+	m.busy = true
+	return m, reloadCmd(m.manager, m.settings, m.snapshot.managed.Privileged)
+}
+
+// checkClaudeNow 立即检测一次 Claude 的线路。没开启监测时也检测，结果只
+// 展示这一次。
+func (m Model) checkClaudeNow() (tea.Model, tea.Cmd) {
+	if m.claudeChecking {
+		m.setMessage("正在检测 Claude 的线路，请稍候")
+		return m, nil
+	}
+	m.claudeChecking = true
+	m.setMessage("正在检测 Claude 的线路...")
+	settings := m.settings
+	settings.ClaudeGuard = true
+	return m, claudeCheckCmd(m.manager, settings, true)
+}
+
+// claudeDue 报告是否该自动检测 Claude 的线路：开启了监测、没有检测在进行、
+// 到了下一次检测的时间。没开启监测时不自动检测。
+func (m Model) claudeDue(now time.Time) bool {
+	return !m.claudeChecking && !now.Before(m.claudeNext) && claudeguard.Enabled(m.paths.ConfigDir, m.settings)
+}
+
+// claudeRouteChanged 在 Mihomo 启停、重载或切换策略后让下一次 tick 立即检测；
+// reset 为真时丢掉之前的结论（用户刚改变了 Claude 的线路）。没开启监测时
+// 清掉手动检测的旧结果，它已经不再成立。
+func (m *Model) claudeRouteChanged(reset bool) {
+	m.claudeNext = time.Time{}
+	if !claudeguard.Enabled(m.paths.ConfigDir, m.settings) {
+		m.claude = claudeguard.Status{}
+		return
+	}
+	if reset && m.claudeTracker != nil {
+		m.claudeTracker.Reset()
+		m.claude = m.claudeTracker.Status()
+	}
+}
+
+// updateDNSPending 记录遗留 DNS 恢复点出现的时间，持续 dnsPendingGrace 后才提示。
+func (m *Model) updateDNSPending(leftover bool, now time.Time) {
+	switch {
+	case !leftover:
+		m.dnsPendingSince = time.Time{}
+	case m.dnsPendingSince.IsZero():
+		m.dnsPendingSince = now
+	}
+	m.dnsPending = leftover && now.Sub(m.dnsPendingSince) >= dnsPendingGrace
+}
+
+// statusCursorFor 在操作列表变化后（例如 Mihomo 启停让「重载」出现或消失）
+// 让光标停在原来的操作上；原操作没了就停在原位置附近。
+func (m Model) statusCursorFor(id statusActionID, found bool) int {
+	actions := m.statusActions()
+	if found {
+		for i, action := range actions {
+			if action.id == id {
+				return i
+			}
+		}
+	}
+	return min(m.cursor, len(actions)-1)
 }
 
 // guideToSetup 把首次使用的用户直接带到配置页的订阅地址编辑态。
@@ -786,16 +960,34 @@ func tailscaleLoggedIn(m Model) bool {
 	return err == nil
 }
 
-// editProxiesFile 用 $EDITOR（默认 vi）打开节点文件；文件不存在时先写入
-// 只有注释的说明。
+// editProxiesFile 用 $EDITOR 编辑节点文件。
 func (m Model) editProxiesFile() (tea.Model, tea.Cmd) {
 	path := m.paths.Proxies
+	return m.editFile(path, nodes.FileTemplate, "编辑节点文件", func() error {
+		_, err := nodes.Load(path, nil)
+		return err
+	}, "节点文件已保存；重载 Mihomo 后生效")
+}
+
+// editClaudeProxyFile 用 $EDITOR 编辑住宅节点文件 claude-proxy.yaml（ss、
+// trojan、vless 等需要完整 Mihomo 节点格式的协议写在这里）。
+func (m Model) editClaudeProxyFile() (tea.Model, tea.Cmd) {
+	configDir, settings := m.paths.ConfigDir, m.settings
+	return m.editFile(filepath.Join(configDir, config.ClaudeProxyFile), claude.FileTemplate, "编辑住宅节点文件", func() error {
+		_, err := claude.Load(configDir, settings)
+		return err
+	}, "住宅节点文件已保存；重载 Mihomo 后生效")
+}
+
+// editFile 用 $VISUAL / $EDITOR（默认 vi）打开 path；文件不存在时先写入只有
+// 注释的 template。编辑器退出后用 check 校验内容，通过时显示 saved。
+func (m Model) editFile(path, template, action string, check func() error, saved string) (tea.Model, tea.Cmd) {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		if err := m.paths.Ensure(); err != nil {
 			m.errorText = err.Error()
 			return m, nil
 		}
-		if err := config.WriteFileAtomic(path, []byte(nodes.FileTemplate), 0o600); err != nil {
+		if err := config.WriteFileAtomic(path, []byte(template), 0o600); err != nil {
 			m.errorText = err.Error()
 			return m, nil
 		}
@@ -811,35 +1003,47 @@ func (m Model) editProxiesFile() (tea.Model, tea.Cmd) {
 	command := exec.Command(fields[0], append(fields[1:], path)...)
 	return m, tea.ExecProcess(command, func(err error) tea.Msg {
 		if err != nil {
-			return actionMsg{err: fmt.Errorf("编辑节点文件: %w", err)}
+			return actionMsg{err: fmt.Errorf("%s: %w", action, err)}
 		}
-		if _, err := nodes.Load(path, nil); err != nil {
+		if err := check(); err != nil {
 			return actionMsg{err: err}
 		}
-		return actionMsg{text: "节点文件已保存；重启 Mihomo 后生效"}
+		return actionMsg{text: saved}
 	})
 }
 
 func (m Model) statusActions() []statusAction {
-	startLabel := "启动 Mihomo"
-	if m.snapshot.managed.Running {
-		startLabel = "停止受管 Mihomo"
+	running := m.snapshot.managed.Running
+	start := statusAction{id: statusStart, label: "启动 Mihomo"}
+	if running {
+		start.label = "停止受管 Mihomo"
 	}
 	var actions []statusAction
 	if !m.hasCore() {
-		actions = []statusAction{
-			{id: statusInstall, label: fmt.Sprintf("安装 Mihomo 核心（%s，启动前必需）", coreChannelText(m.settings.CoreChannel))},
-			{id: statusStart, label: startLabel},
-			{id: statusValidate, label: "生成并校验配置"},
-		}
-	} else {
-		actions = []statusAction{
-			{id: statusStart, label: startLabel},
-			{id: statusValidate, label: "生成并校验配置"},
-			{id: statusInstall, label: fmt.Sprintf("更新 Mihomo 核心（%s）", coreChannelText(m.settings.CoreChannel))},
-		}
+		actions = append(actions, statusAction{id: statusInstall, label: fmt.Sprintf("安装 Mihomo 核心（%s，启动前必需）", coreChannelText(m.settings.CoreChannel))})
 	}
-	actions = append(actions, statusAction{id: statusShare, label: "Clash Mi 扫码导入"})
+	actions = append(actions, start)
+	if running {
+		actions = append(actions, statusAction{id: statusReload, label: "重载 Mihomo（重新生成配置并重启，让修改生效）"})
+	}
+	if m.dnsPending {
+		actions = append(actions, statusAction{id: statusRecoverDNS, label: "恢复系统 DNS（上次运行遗留）"})
+	}
+	actions = append(actions, statusAction{id: statusValidate, label: "生成并校验配置"})
+	if m.hasCore() {
+		actions = append(actions, statusAction{id: statusInstall, label: fmt.Sprintf("更新 Mihomo 核心（%s）", coreChannelText(m.settings.CoreChannel))})
+	}
+	if m.snapshot.healthy {
+		actions = append(actions, statusAction{id: statusRecoverWeChat, label: "刷新微信直连（微信图片发不出去时用）"})
+	}
+	claudeLabel := "检测 Claude 线路"
+	if m.claudeChecking {
+		claudeLabel += "（正在检测...）"
+	}
+	actions = append(actions,
+		statusAction{id: statusClaudeCheck, label: claudeLabel},
+		statusAction{id: statusShare, label: "Clash Mi 扫码导入"},
+	)
 	if m.appUpdateAvailable {
 		actions = append(actions, statusAction{
 			id:    statusUpdateApp,
@@ -860,6 +1064,8 @@ func (m Model) selectInstall() (tea.Model, tea.Cmd) {
 	m.snapshot.managed.CorePath = ""
 	m.snapshot.managed.CoreVersion = ""
 	m.coreFound = false
+	m.active = tabStatus
+	m.resetViewState()
 	m.cursor = 0
 	m.busy = false
 	m.errorText = "尚未安装 Mihomo 核心；已选中安装操作，请按 Enter 执行（不需要 sudo）"
@@ -973,9 +1179,9 @@ var configFields = []configField{
 		},
 		enter: func(m Model) (tea.Model, tea.Cmd) {
 			m.settings.TailscaleEnabled = !m.settings.TailscaleEnabled
-			message := "已关闭 Tailscale；重启 Mihomo 后生效"
+			message := "已关闭 Tailscale；重载 Mihomo 后生效"
 			if m.settings.TailscaleEnabled {
-				message = "已开启 Tailscale；重启 Mihomo 后生效"
+				message = "已开启 Tailscale；重载 Mihomo 后生效"
 				if !tailscaleLoggedIn(m) && m.settings.TailscaleAuthKey == "" {
 					message += "。首次登录需要填写 Auth Key"
 				}
@@ -1019,7 +1225,7 @@ var configFields = []configField{
 		value: func(m Model) string { return boolText(m.settings.AllowLAN, "允许 0.0.0.0", "仅本机 127.0.0.1") },
 		enter: func(m Model) (tea.Model, tea.Cmd) {
 			m.settings.AllowLAN = !m.settings.AllowLAN
-			return m.saveSettings("局域网代理已更新；重启 Mihomo 后生效")
+			return m.saveSettings("局域网代理已更新；重载 Mihomo 后生效")
 		},
 	},
 	{
@@ -1048,7 +1254,7 @@ var configFields = []configField{
 		value: func(m Model) string { return boolText(m.settings.ChinaDirect, "直连", "走外网代理") },
 		enter: func(m Model) (tea.Model, tea.Cmd) {
 			m.settings.ChinaDirect = !m.settings.ChinaDirect
-			return m.saveSettings("国内流量策略已更新；重启 Mihomo 后生效")
+			return m.saveSettings("国内流量策略已更新；重载 Mihomo 后生效")
 		},
 	},
 	{
@@ -1067,6 +1273,21 @@ var configFields = []configField{
 			m.beginEdit(fieldClaudeProxy, m.settings.ClaudeProxy)
 			return m, nil
 		},
+	},
+	{
+		label: "住宅节点文件",
+		value: func(m Model) string {
+			fileOnly := m.settings
+			fileOnly.ClaudeProxy = ""
+			if !claude.Configured(m.paths.ConfigDir, fileOnly) {
+				return "未使用（ss、trojan 等协议写这里；Enter 用 $EDITOR 编辑 " + config.ClaudeProxyFile + "）"
+			}
+			if _, err := claude.Load(m.paths.ConfigDir, m.settings); err != nil {
+				return "有错误：" + err.Error()
+			}
+			return "已写入节点（Enter 编辑 " + config.ClaudeProxyFile + "）"
+		},
+		enter: Model.editClaudeProxyFile,
 	},
 	{
 		label: "住宅节点连接方式",
@@ -1090,7 +1311,7 @@ var configFields = []configField{
 				m.errorText = err.Error()
 				return m, nil
 			}
-			return m.saveSettings("住宅节点连接方式已更新；重启 Mihomo 后生效")
+			return m.saveSettings("住宅节点连接方式已更新；重载 Mihomo 后生效")
 		},
 	},
 	{
@@ -1107,8 +1328,9 @@ var configFields = []configField{
 				return m, nil
 			}
 			m.settings.ClaudeGuard = !m.settings.ClaudeGuard
+			m.claudeRouteChanged(true)
 			return m.saveSettings(boolText(m.settings.ClaudeGuard,
-				"已开启 Claude 访问监测：桌面版打开时由它弹窗，否则由 macOS 系统弹窗提醒",
+				"已开启 Claude 访问监测：状态页显示检测结论，出问题时桌面版或 macOS 系统弹窗提醒",
 				"已关闭 Claude 访问监测"))
 		},
 	},
@@ -1314,8 +1536,18 @@ func (m Model) handlePolicyKey(key string) (tea.Model, tea.Cmd) {
 
 var ruleTargets = customrules.DomainTargets
 
+// 规则页各行，与 rulesView 的顺序一致。
+const (
+	ruleRowWebsite = iota
+	ruleRowTest
+	ruleRowTarget
+	ruleRowSave
+	ruleRowReload
+	ruleRows
+)
+
 func (m Model) handleRulesKey(key string) (tea.Model, tea.Cmd) {
-	const fields = 4
+	const fields = ruleRows
 	switch key {
 	case "up", "k":
 		m.cursor = (m.cursor + fields - 1) % fields
@@ -1323,13 +1555,17 @@ func (m Model) handleRulesKey(key string) (tea.Model, tea.Cmd) {
 		m.cursor = (m.cursor + 1) % fields
 	case "enter", "space", "e":
 		switch m.cursor {
-		case 0:
+		case ruleRowWebsite:
 			m.beginEdit(editRuleWebsite, m.ruleInput)
-		case 1:
+		case ruleRowTest:
 			return m.testRuleRoute()
-		case 2:
+		case ruleRowTarget:
 			m.ruleTarget = (m.ruleTarget + 1) % len(ruleTargets)
-		case 3:
+		case ruleRowReload:
+			m.message = ""
+			m.errorText = ""
+			return m.reloadMihomo()
+		case ruleRowSave:
 			domain, err := customrules.DomainFromInput(m.ruleInput)
 			if err != nil {
 				m.errorText = err.Error()
@@ -1341,7 +1577,9 @@ func (m Model) handleRulesKey(key string) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.userRules, _ = customrules.Load(m.customRulesPath())
-			m.setMessage("规则已保存；重新生成配置并重启 Mihomo 后生效")
+			// 光标移到「重载」行，再按一次 Enter 即可让规则生效。
+			m.cursor = ruleRowReload
+			m.setMessage("规则已保存；按 Enter 重载 Mihomo 后生效")
 			m.errorText = ""
 		}
 	}
@@ -1719,7 +1957,7 @@ func (m Model) commitEdit() (tea.Model, tea.Cmd) {
 		m.ruleInput = value
 		m.editing = false
 		m.resetPathCompletion()
-		m.cursor = 1
+		m.cursor = ruleRowTest
 		return m.testRuleRoute()
 	}
 	switch m.editField {
@@ -1732,9 +1970,9 @@ func (m Model) commitEdit() (tea.Model, tea.Cmd) {
 		m.editing = false
 		m.resetPathCompletion()
 		if value == "" {
-			return m.saveSettings("已清除订阅地址；重启 Mihomo 后生效")
+			return m.saveSettings("已清除订阅地址；重载 Mihomo 后生效")
 		}
-		return m.saveSettings("订阅地址已保存；启动或重启 Mihomo 后自动下载节点")
+		return m.saveSettings("订阅地址已保存；启动或重载 Mihomo 后自动下载节点")
 	case fieldIntranetDomains, fieldIntranetCIDRs, fieldIntranetDNS, fieldIntranetHTTP, fieldIntranetProbe:
 		updated := m.settings
 		switch m.editField {
@@ -1756,7 +1994,7 @@ func (m Model) commitEdit() (tea.Model, tea.Cmd) {
 		m.settings = updated
 		m.editing = false
 		m.resetPathCompletion()
-		return m.saveSettings("内网设置已保存；重启 Mihomo 后生效")
+		return m.saveSettings("内网设置已保存；重载 Mihomo 后生效")
 	case fieldTailscaleAuthKey, fieldTailscaleHostname, fieldTailscaleControlURL, fieldTailscaleExitNode:
 		updated := m.settings
 		switch m.editField {
@@ -1776,14 +2014,14 @@ func (m Model) commitEdit() (tea.Model, tea.Cmd) {
 		m.settings = updated
 		m.editing = false
 		m.resetPathCompletion()
-		return m.saveSettings("Tailscale 设置已保存；重启 Mihomo 后生效")
+		return m.saveSettings("Tailscale 设置已保存；重载 Mihomo 后生效")
 	case fieldOVPN:
 		if value == "" {
 			m.settings.OVPNPath = ""
 			m.settings.Remote = ""
 			m.editing = false
 			m.resetPathCompletion()
-			return m.saveSettings("已移除内网 .ovpn；重启 Mihomo 后生效")
+			return m.saveSettings("已移除内网 .ovpn；重载 Mihomo 后生效")
 		}
 		normalized, err := normalizeOVPNPath(value)
 		if err != nil {
@@ -1817,9 +2055,9 @@ func (m Model) commitEdit() (tea.Model, tea.Cmd) {
 		m.editing = false
 		m.resetPathCompletion()
 		if value == "" {
-			return m.saveSettings("已清除住宅节点地址；重启 Mihomo 后生效")
+			return m.saveSettings("已清除住宅节点地址；重载 Mihomo 后生效")
 		}
-		return m.saveSettings("住宅节点已保存；重启 Mihomo 后 Claude 改走住宅节点")
+		return m.saveSettings("住宅节点已保存；重载 Mihomo 后 Claude 改走住宅节点")
 	case fieldMixedPort, fieldControllerPort, fieldDNSPort:
 		port, err := strconv.Atoi(value)
 		if err != nil || port < 1 || port > 65535 {
@@ -1845,9 +2083,9 @@ func (m Model) commitEdit() (tea.Model, tea.Cmd) {
 func proxyAuthMessage(settings config.Settings) string {
 	switch {
 	case settings.ProxyAuthEnabled():
-		return "代理认证已更新；重启 Mihomo 后生效"
+		return "代理认证已更新；重载 Mihomo 后生效"
 	case settings.ProxyUsername == "" && settings.ProxyPassword == "":
-		return "代理认证已关闭；重启 Mihomo 后生效"
+		return "代理认证已关闭；重载 Mihomo 后生效"
 	default:
 		return "已保存；用户名和密码都设置后局域网代理才要求认证"
 	}
@@ -1868,8 +2106,9 @@ func (m Model) saveSettings(message string) (tea.Model, tea.Cmd) {
 func refreshCmd(m Model) tea.Cmd {
 	prevProfile, prevStamp := m.snapshot.profile, m.snapshot.profileStamp
 	return func() tea.Msg {
-		result := snapshot{}
+		result := snapshot{loaded: true}
 		result.managed = m.manager.Status()
+		result.dnsLeftover = m.manager.LeftoverDNS(result.managed.Running)
 		result.vpn = system.InspectVPN()
 		client := controller.New(m.settings.ControllerPort, m.settings.ControllerSecret)
 		result.healthy = client.Healthy()
@@ -1970,8 +2209,71 @@ func runStopCmd(man manager.Manager) tea.Cmd {
 	return func() tea.Msg { return actionMsg{text: "Mihomo 已停止", err: man.Stop()} }
 }
 
-// reloadCmd 重新加载受管 Mihomo，让新安装的 APP 或改动后的规则立即生效。
-// privileged 表示当前运行或即将启动的 Mihomo 需要管理员权限。
+// reloadCmd 重新生成配置并重启受管 Mihomo，让设置和规则的修改立即生效。
+// 停止以管理员身份运行的 Mihomo、以 TUN 模式重新启动都需要管理员授权。
+func reloadCmd(man manager.Manager, settings config.Settings, privileged bool) tea.Cmd {
+	if (privileged || settings.TunEnabled) && !system.CanUseSudoWithoutPrompt() {
+		return authorizeAdministratorCmd("reload", settings)
+	}
+	return runReloadCmd(man, settings)
+}
+
+func runReloadCmd(man manager.Manager, settings config.Settings) tea.Cmd {
+	return func() tea.Msg {
+		pid, err := man.Reload(settings)
+		return actionMsg{text: fmt.Sprintf("已重新生成配置并重启 Mihomo，PID %d", pid), err: err}
+	}
+}
+
+// recoverDNSCmd 恢复上次运行遗留的系统 DNS 设置，需要管理员授权。
+func recoverDNSCmd(man manager.Manager) tea.Cmd {
+	if !system.CanUseSudoWithoutPrompt() {
+		return authorizeAdministratorCmd("recover-dns", config.Settings{})
+	}
+	return runRecoverDNSCmd(man)
+}
+
+func runRecoverDNSCmd(man manager.Manager) tea.Cmd {
+	return func() tea.Msg {
+		restored, err := man.RecoverLeftoverDNS()
+		switch {
+		case err != nil:
+			return actionMsg{err: err}
+		case !restored:
+			return actionMsg{text: "没有需要恢复的 DNS 设置"}
+		default:
+			return actionMsg{text: "已恢复启动前的系统 DNS"}
+		}
+	}
+}
+
+// recoverWeChatCmd 只关闭已经直连的腾讯连接，让微信重新建立，不重启 Mihomo。
+func recoverWeChatCmd(man manager.Manager) tea.Cmd {
+	return func() tea.Msg {
+		closed, err := man.RecoverWeChatConnections()
+		if err != nil {
+			return actionMsg{err: fmt.Errorf("恢复微信图片连接（已刷新 %d 条）: %w", closed, err)}
+		}
+		return actionMsg{text: fmt.Sprintf("已刷新 %d 条微信直连，Mihomo 保持运行", closed)}
+	}
+}
+
+// claudeCheckTimeout 限定一次 Claude 线路检测的总时间。
+const claudeCheckTimeout = 30 * time.Second
+
+// probeClaude 做一次 Claude 线路检测；测试替换它以避免访问网络。
+var probeClaude = func(man manager.Manager, settings config.Settings) claudeguard.Status {
+	ctx, cancel := context.WithTimeout(context.Background(), claudeCheckTimeout)
+	defer cancel()
+	return claudeguard.Observe(ctx, man.ClaudeEnv(settings))
+}
+
+func claudeCheckCmd(man manager.Manager, settings config.Settings, manual bool) tea.Cmd {
+	return func() tea.Msg {
+		return claudeMsg{status: probeClaude(man, settings), manual: manual}
+	}
+}
+
 func authorizeAdministratorCmd(operation string, settings config.Settings) tea.Cmd {
 	return tea.ExecProcess(system.AdministratorAuthorizationCommand(), func(err error) tea.Msg {
 		return administratorAuthorizationMsg{operation: operation, settings: settings, err: err}
@@ -2078,7 +2380,7 @@ func testRouteCmd(controllerPort int, secret string, mixedPort int, host string,
 func selectPolicyCmd(port int, secret, group, choice string) tea.Cmd {
 	return func() tea.Msg {
 		err := controller.New(port, secret).Select(group, choice)
-		return actionMsg{text: fmt.Sprintf("%s 已切换为 %s", group, choice), err: err}
+		return actionMsg{text: fmt.Sprintf("%s 已切换为 %s", group, choice), err: err, claudeReset: err == nil}
 	}
 }
 

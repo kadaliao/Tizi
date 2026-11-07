@@ -4,6 +4,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +13,8 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/kadaliao/tizi/internal/appupdate"
+	"github.com/kadaliao/tizi/internal/claude"
+	"github.com/kadaliao/tizi/internal/claudeguard"
 	"github.com/kadaliao/tizi/internal/config"
 	"github.com/kadaliao/tizi/internal/configshare"
 	"github.com/kadaliao/tizi/internal/controller"
@@ -199,8 +203,8 @@ func TestRulesPageSavesDomainRule(t *testing.T) {
 	if got := updated.userRules[0]; got.Domain != "docs.example.com" || got.Target != "外网代理" {
 		t.Fatalf("saved rule = %#v", got)
 	}
-	if !strings.Contains(updated.message, "重新生成配置并重启") {
-		t.Fatalf("missing restart guidance: %q", updated.message)
+	if !strings.Contains(updated.message, "重载 Mihomo 后生效") || updated.cursor != ruleRowReload {
+		t.Fatalf("save should point at the reload row: message=%q cursor=%d", updated.message, updated.cursor)
 	}
 }
 
@@ -473,6 +477,7 @@ func TestConfigFieldConstantsMatchRows(t *testing.T) {
 		fieldProxyUsername:       "代理用户名",
 		fieldProxyPassword:       "代理密码",
 		fieldClaudeProxy:         "Claude 住宅节点",
+		fieldClaudeProxyFile:     "住宅节点文件",
 		fieldClaudeProxyDirect:   "住宅节点连接方式",
 		fieldClaudeGuard:         "Claude 访问监测",
 		fieldClaudeBlock:         "Claude 直连保护",
@@ -1023,5 +1028,298 @@ func TestIntranetListEditValidates(t *testing.T) {
 	updatedModel, _ = model.commitEdit()
 	if got := updatedModel.(Model).settings.IntranetCIDRs; len(got) != 2 || got[1] != "172.30.0.0/16" {
 		t.Fatalf("CIDRs = %#v", got)
+	}
+}
+
+func actionIDs(actions []statusAction) []statusActionID {
+	ids := make([]statusActionID, len(actions))
+	for i, action := range actions {
+		ids[i] = action.id
+	}
+	return ids
+}
+
+func TestStatusActionsFollowRuntimeState(t *testing.T) {
+	model := Model{snapshot: snapshot{managed: manager.Status{CorePath: "/tmp/mihomo"}}}
+	stopped := actionIDs(model.statusActions())
+	want := []statusActionID{statusStart, statusValidate, statusInstall, statusClaudeCheck, statusShare}
+	if !slices.Equal(stopped, want) {
+		t.Fatalf("stopped actions = %v, want %v", stopped, want)
+	}
+
+	model.snapshot.managed.Running = true
+	model.snapshot.healthy = true
+	running := actionIDs(model.statusActions())
+	want = []statusActionID{statusStart, statusReload, statusValidate, statusInstall, statusRecoverWeChat, statusClaudeCheck, statusShare}
+	if !slices.Equal(running, want) {
+		t.Fatalf("running actions = %v, want %v", running, want)
+	}
+
+	model = Model{snapshot: snapshot{managed: manager.Status{CorePath: "/tmp/mihomo"}}, dnsPending: true}
+	if ids := actionIDs(model.statusActions()); ids[1] != statusRecoverDNS {
+		t.Fatalf("leftover DNS should offer recovery right after start: %v", ids)
+	}
+}
+
+// Mihomo 启停会让「重载」出现或消失，光标要留在原来的操作上。
+func TestStatusCursorFollowsActionAcrossRefresh(t *testing.T) {
+	model := Model{
+		active:   tabStatus,
+		cursor:   1,
+		snapshot: snapshot{loaded: true, managed: manager.Status{CorePath: "/tmp/mihomo"}},
+	}
+	if model.statusActions()[1].id != statusValidate {
+		t.Fatal("test expects validate at index 1 while stopped")
+	}
+	updatedModel, _ := model.Update(snapshotMsg{loaded: true, managed: manager.Status{CorePath: "/tmp/mihomo", Running: true, PID: 7}})
+	updated := updatedModel.(Model)
+	if got := updated.statusActions()[updated.cursor].id; got != statusValidate {
+		t.Fatalf("cursor moved to %v after reload appeared", got)
+	}
+}
+
+func readyPathsWithCore(t *testing.T) (config.Paths, config.Settings) {
+	t.Helper()
+	withoutMihomoOnPath(t)
+	paths, _ := testPathsAndOVPN(t)
+	if err := os.MkdirAll(filepath.Dir(paths.CoreBin), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.CoreBin, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	settings := config.DefaultSettings()
+	settings.Subscription = "https://example.com/api/v1/client/subscribe?token=abc"
+	return paths, settings
+}
+
+func TestReloadActionStartsBackgroundReload(t *testing.T) {
+	paths, settings := readyPathsWithCore(t)
+	model := Model{
+		paths:    paths,
+		settings: settings,
+		snapshot: snapshot{managed: manager.Status{CorePath: paths.CoreBin, Running: true}},
+	}
+	model.cursor = slices.Index(actionIDs(model.statusActions()), statusReload)
+	updatedModel, cmd := model.handleStatusKey("enter")
+	updated := updatedModel.(Model)
+	if !updated.busy || cmd == nil {
+		t.Fatalf("reload was not started: busy=%v cmd=%v", updated.busy, cmd)
+	}
+}
+
+func TestRulesReloadRowStartsMihomoWhenStopped(t *testing.T) {
+	paths, _ := testPathsAndOVPN(t)
+	model := Model{paths: paths, settings: config.DefaultSettings(), active: tabRules, cursor: ruleRowReload}
+	updatedModel, _ := model.handleRulesKey("enter")
+	updated := updatedModel.(Model)
+	// 没有任何线路时和状态页的「启动」一样，引导去填订阅地址。
+	if updated.active != tabConfig || !updated.editing || updated.editField != fieldSubscription {
+		t.Fatalf("reload without routes should guide to setup: active=%d editing=%v field=%d", updated.active, updated.editing, updated.editField)
+	}
+	view := ansi.Strip(Model{active: tabRules, snapshot: snapshot{managed: manager.Status{Running: true}}}.rulesView(80))
+	if !strings.Contains(view, "重载 Mihomo 使规则生效") || !strings.Contains(view, "测试只建立连接") {
+		t.Fatalf("rules page lacks the reload entry: %s", view)
+	}
+}
+
+func TestManualClaudeCheckWithoutMonitoringShowsResultDirectly(t *testing.T) {
+	paths, _ := testPathsAndOVPN(t)
+	model := Model{paths: paths, settings: config.DefaultSettings()}
+	checked := claudeguard.Status{Level: claudeguard.LevelAlert, Key: claudeguard.KeyDirect, Title: "Claude 正在直连", CheckedAt: time.Now()}
+
+	original := probeClaude
+	t.Cleanup(func() { probeClaude = original })
+	var probed config.Settings
+	probeClaude = func(_ manager.Manager, settings config.Settings) claudeguard.Status {
+		probed = settings
+		return checked
+	}
+
+	updatedModel, cmd := model.checkClaudeNow()
+	updated := updatedModel.(Model)
+	if !updated.claudeChecking || cmd == nil {
+		t.Fatalf("manual check not started: checking=%v cmd=%v", updated.claudeChecking, cmd)
+	}
+	msg := cmd()
+	if !probed.ClaudeGuard {
+		t.Fatal("a manual check must run even when monitoring is off")
+	}
+	updatedModel, _ = updated.Update(msg)
+	updated = updatedModel.(Model)
+	if updated.claudeChecking || updated.claude.Title != "Claude 正在直连" {
+		t.Fatalf("manual result not shown: %#v", updated.claude)
+	}
+	view := ansi.Strip(updated.statusView(100))
+	if !strings.Contains(view, "Claude：Claude 正在直连") || !strings.Contains(view, "未开启自动监测") {
+		t.Fatalf("status page lacks the Claude conclusion: %s", view)
+	}
+	if updated.claudeDue(time.Now()) {
+		t.Fatal("no automatic checks while monitoring is off")
+	}
+}
+
+func TestMonitoredClaudeAlertNeedsConfirmation(t *testing.T) {
+	paths, _ := testPathsAndOVPN(t)
+	settings := config.DefaultSettings()
+	settings.ClaudeGuard = true
+	model := Model{paths: paths, settings: settings}
+	if !model.claudeDue(time.Now()) {
+		t.Fatal("monitoring on and never checked: a check is due")
+	}
+	model.claudeChecking = true
+	if model.claudeDue(time.Now()) {
+		t.Fatal("no second check while one is running")
+	}
+
+	alert := claudeguard.Status{Level: claudeguard.LevelAlert, Key: claudeguard.KeyUnreachable, Title: "无法经代理节点访问 Claude", CheckedAt: time.Now()}
+	updatedModel, _ := model.Update(claudeMsg{status: alert})
+	updated := updatedModel.(Model)
+	if updated.claude.Level == claudeguard.LevelAlert || updated.claude.Pending != 1 {
+		t.Fatalf("a single failure should only be pending: %#v", updated.claude)
+	}
+	if wait := time.Until(updated.claudeNext); wait > claudeguard.ConfirmInterval {
+		t.Fatalf("recheck scheduled %v later, want within %v", wait, claudeguard.ConfirmInterval)
+	}
+	alert.CheckedAt = time.Now()
+	updatedModel, _ = updated.Update(claudeMsg{status: alert})
+	updated = updatedModel.(Model)
+	if updated.claude.Level != claudeguard.LevelAlert {
+		t.Fatalf("confirmed failure should alert: %#v", updated.claude)
+	}
+
+	// 切换策略后旧结论作废，下一次 tick 立即检测。
+	updatedModel, _ = updated.Update(actionMsg{text: "Claude 已切换为 住宅节点", claudeReset: true})
+	updated = updatedModel.(Model)
+	if updated.claude.Level != claudeguard.LevelChecking || !updated.claudeDue(time.Now()) {
+		t.Fatalf("policy switch should reset the conclusion: %#v due=%v", updated.claude, updated.claudeDue(time.Now()))
+	}
+}
+
+func TestTickStartsDueClaudeCheck(t *testing.T) {
+	paths, _ := testPathsAndOVPN(t)
+	settings := config.DefaultSettings()
+	settings.ClaudeGuard = true
+	model := Model{paths: paths, settings: settings, manager: manager.Manager{Paths: paths}}
+	updatedModel, _ := model.Update(tickMsg(time.Now()))
+	if !updatedModel.(Model).claudeChecking {
+		t.Fatal("tick should start a due Claude check")
+	}
+	settings.ClaudeGuard = false
+	model.settings = settings
+	updatedModel, _ = model.Update(tickMsg(time.Now()))
+	if updatedModel.(Model).claudeChecking {
+		t.Fatal("tick must not probe Claude while monitoring is off")
+	}
+}
+
+func TestLeftoverDNSIsReportedAfterGrace(t *testing.T) {
+	var model Model
+	start := time.Now()
+	model.updateDNSPending(true, start)
+	if model.dnsPending {
+		t.Fatal("a fresh DNS snapshot may belong to a start in progress")
+	}
+	model.updateDNSPending(true, start.Add(dnsPendingGrace))
+	if !model.dnsPending {
+		t.Fatal("a lasting DNS snapshot should be reported")
+	}
+	model.updateDNSPending(false, start.Add(2*dnsPendingGrace))
+	if model.dnsPending || !model.dnsPendingSince.IsZero() {
+		t.Fatal("recovered DNS should clear the notice")
+	}
+}
+
+func TestStatusShowsTrafficProxyTailscaleAndClaudeExit(t *testing.T) {
+	paths, _ := testPathsAndOVPN(t)
+	settings := config.DefaultSettings()
+	settings.AllowLAN = true
+	settings.ProxyUsername, settings.ProxyPassword = "tizi", "secret"
+	settings.TailscaleEnabled = true
+	settings.TailscaleHostname = "office-mac"
+	settings.ChinaDirect = false
+	model := Model{
+		paths:           paths,
+		settings:        settings,
+		snapshot:        snapshot{healthy: true, managed: manager.Status{Running: true, PID: 9}, connections: []controller.Connection{{ID: "a"}, {ID: "b"}}},
+		connectionRates: map[string]connectionRate{"a": {Download: 2 << 20, Upload: 1024}, "b": {Download: 1 << 20}},
+		claude:          claudeguard.Status{Level: claudeguard.LevelOK, Title: "Claude 经代理节点访问正常", ExitIP: "203.0.113.9", Country: "US", CheckedAt: time.Now()},
+	}
+	view := ansi.Strip(model.statusView(120))
+	for _, want := range []string{
+		"↓ 3.0MiB/s  ↑ 1.0KiB/s · 2 条连接",
+		"0.0.0.0:" + strconv.Itoa(settings.MixedPort) + "（HTTP/SOCKS5） · 局域网需要用户名和密码",
+		"开启（设备名 office-mac）",
+		"经外网代理",
+		"代理节点 · 203.0.113.9（US）",
+		"Claude 经代理节点访问正常",
+	} {
+		if !strings.Contains(view, want) {
+			t.Errorf("status page lacks %q:\n%s", want, view)
+		}
+	}
+}
+
+func TestShortTerminalKeepsActionsVisible(t *testing.T) {
+	model := Model{
+		settings: config.DefaultSettings(),
+		height:   24,
+		snapshot: snapshot{healthy: true, managed: manager.Status{Running: true, CorePath: "/tmp/mihomo"}},
+	}
+	view := ansi.Strip(model.statusView(80))
+	for _, want := range []string{"受管 Mihomo", "拉高窗口可见", "Clash Mi 扫码导入", "重载 Mihomo"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("short status page lacks %q:\n%s", want, view)
+		}
+	}
+	if strings.Contains(view, "APP 版本") {
+		t.Errorf("low-priority rows should be trimmed first:\n%s", view)
+	}
+}
+
+func TestEditClaudeProxyFileWritesTemplateFirst(t *testing.T) {
+	paths, _ := testPathsAndOVPN(t)
+	t.Setenv("VISUAL", "")
+	t.Setenv("EDITOR", "true")
+	model := Model{paths: paths, settings: config.DefaultSettings(), cursor: fieldClaudeProxyFile}
+	_, cmd := model.handleConfigKey("enter")
+	if cmd == nil {
+		t.Fatal("editing claude-proxy.yaml should open the editor")
+	}
+	data, err := os.ReadFile(filepath.Join(paths.ConfigDir, config.ClaudeProxyFile))
+	if err != nil || string(data) != claude.FileTemplate {
+		t.Fatalf("template not written: %v", err)
+	}
+	if value := configFields[fieldClaudeProxyFile].value(model); !strings.Contains(value, "未使用") {
+		t.Fatalf("a comment-only file is not a node: %q", value)
+	}
+}
+
+func TestHelpMentionsNewStatusActions(t *testing.T) {
+	help := ansi.Strip(Model{}.helpView(120))
+	for _, want := range []string{"重载 Mihomo", "刷新微信直连", "检测 Claude 线路", "claude-proxy.yaml"} {
+		if !strings.Contains(help, want) {
+			t.Errorf("help lacks %q", want)
+		}
+	}
+}
+
+func TestRefreshReportsLeftoverDNS(t *testing.T) {
+	paths, _ := testPathsAndOVPN(t)
+	paths.DNSState = filepath.Join(paths.ConfigDir, "dns-state.json")
+	paths.PIDFile = filepath.Join(paths.ConfigDir, "mihomo.pid")
+	paths.LogFile = filepath.Join(paths.ConfigDir, "mihomo.log")
+	if err := os.MkdirAll(paths.ConfigDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.DNSState, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	settings := config.DefaultSettings()
+	settings.ControllerPort = 1 // 不会有 Controller 在线
+	model := Model{paths: paths, settings: settings, manager: manager.Manager{Paths: paths}}
+	msg := refreshCmd(model)().(snapshotMsg)
+	if !msg.loaded || !msg.dnsLeftover {
+		t.Fatalf("refresh should report a leftover DNS snapshot: loaded=%v leftover=%v", msg.loaded, msg.dnsLeftover)
 	}
 }

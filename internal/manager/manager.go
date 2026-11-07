@@ -354,6 +354,18 @@ func (m Manager) RecoverLeftoverDNS() (bool, error) {
 	return m.RecoverDNS()
 }
 
+// LeftoverDNS 报告有没有上次运行遗留、尚未恢复的系统 DNS 设置：受管 Mihomo
+// 没在运行，DNS 恢复点却还在。启动时会先保存恢复点再写入 PID，调用方要让
+// 这个状态持续几秒再提示。
+func (m Manager) LeftoverDNS(running bool) bool {
+	path := m.dnsStatePath()
+	if running || path == "" {
+		return false
+	}
+	_, err := os.Stat(path)
+	return err == nil
+}
+
 func (m Manager) dnsStatePath() string {
 	if m.Paths.DNSState != "" {
 		return m.Paths.DNSState
