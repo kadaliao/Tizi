@@ -1,0 +1,32 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.go]
+indent_style = tab
+
+[{Makefile,*.mk}]
+indent_style = tab
+
+[*.sh]
+indent_style = tab
+
+[*.swift]
+indent_style = space
+indent_size = 4
+
+[*.{yml,yaml,json,md}]
+indent_style = space
+indent_size = 2
+
+[*.md]
+trim_trailing_whitespace = false
+
+[internal/tracescope/web/**]
+# vendored 快照，保持上游格式
+indent_style = unset
+indent_size = unset

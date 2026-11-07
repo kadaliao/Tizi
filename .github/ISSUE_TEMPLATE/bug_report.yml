@@ -1,0 +1,66 @@
+name: 问题反馈
+description: 连不上、分流不对、界面出错等问题
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈！**提交前请删掉所有个人凭据**：订阅地址、节点地址和密码、`.ovpn` 内容、Tailscale Auth Key、你的公网 IP。Issue 是公开的，删不干净就只贴相关的几行。
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: 运行 `tizi version` 的输出
+      placeholder: tizi v1.0.0
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: 系统
+      options:
+        - macOS（Apple 芯片）
+        - macOS（Intel）
+        - Ubuntu 22.04
+        - Ubuntu 24.04
+        - 其他
+    validations:
+      required: true
+  - type: dropdown
+    id: interface
+    attributes:
+      label: 使用方式
+      options:
+        - 桌面版
+        - 终端版
+        - 命令行
+  - type: checkboxes
+    id: routes
+    attributes:
+      label: 使用的线路
+      options:
+        - label: 订阅
+        - label: 节点文件
+        - label: 内网 OVPN
+        - label: Tailscale
+        - label: Claude 住宅节点
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 现象
+      description: 发生了什么，你期望的是什么
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. ...
+        2. ...
+  - type: textarea
+    id: diagnose
+    attributes:
+      label: 诊断输出
+      description: 运行 `tizi diagnose` 的输出，或日志里相关的几行。**贴之前务必删掉订阅地址、IP、密码和密钥。**
+      render: text

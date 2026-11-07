@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 报告安全漏洞
+    url: https://github.com/kadaliao/Tizi/security/advisories/new
+    about: 安全问题请私下报告，不要公开提 Issue
+  - name: 使用文档
+    url: https://github.com/kadaliao/Tizi/tree/main/docs
+    about: 安装、配置和常见问题

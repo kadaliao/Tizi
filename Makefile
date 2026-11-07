@@ -1,4 +1,4 @@
-.PHONY: build test fmt lint install release gui install-gui
+.PHONY: build test fmt lint check install release gui install-gui
 
 VERSION ?= $(shell git describe --tags --dirty 2>/dev/null || printf dev)
 BINARY := bin/tizi
@@ -16,6 +16,13 @@ fmt:
 lint:
 	go vet ./...
 	go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
+
+# 提交前的完整检查，与 CI 的 Go 部分一致。
+check:
+	@unformatted="$$(gofmt -l cmd internal)"; \
+	if [ -n "$$unformatted" ]; then echo "需要 gofmt:"; echo "$$unformatted"; exit 1; fi
+	go test -race ./...
+	$(MAKE) lint
 
 release:
 	./scripts/release.sh "$(VERSION)"
