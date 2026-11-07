@@ -1,0 +1,10 @@
+/bin/
+/dist/
+/.opencode/
+*.ovpn
+/*.yaml
+.DS_Store
+/reasonix.toml
+# 防御性忽略：vendored 看板目录不应出现安装/构建残留（见 web/VENDOR.md）
+internal/tracescope/web/node_modules/
+internal/tracescope/web/dist/
