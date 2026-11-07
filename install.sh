@@ -60,7 +60,7 @@ install_tmp="$BIN_DIR/.tizi.$$"
 if [ -f "$script_dir/go.mod" ] && [ -d "$script_dir/cmd/tizi" ]; then
 	source_build=1
 	command -v go >/dev/null 2>&1 || {
-		printf 'error: 从源码安装需要 Go 1.25 或更高版本\n' >&2
+		printf 'error: 从源码安装需要 Go 1.26 或更高版本\n' >&2
 		exit 1
 	}
 	go_version="$(go env GOVERSION)"
@@ -82,8 +82,8 @@ if [ -f "$script_dir/go.mod" ] && [ -d "$script_dir/cmd/tizi" ]; then
 		exit 1
 		;;
 	esac
-	if [ "$go_major" -lt 1 ] || { [ "$go_major" -eq 1 ] && [ "$go_minor" -lt 25 ]; }; then
-		printf 'error: 从源码安装需要 Go 1.25 或更高版本，当前为 %s\n' "$go_version" >&2
+	if [ "$go_major" -lt 1 ] || { [ "$go_major" -eq 1 ] && [ "$go_minor" -lt 26 ]; }; then
+		printf 'error: 从源码安装需要 Go 1.26 或更高版本，当前为 %s\n' "$go_version" >&2
 		exit 1
 	fi
 	if [ -z "$VERSION" ]; then
