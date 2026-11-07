@@ -64,21 +64,29 @@ type Hello struct {
 
 // Snapshot 是每 2 秒推送一次的完整状态，字段含义与 TUI 状态页一致。
 type Snapshot struct {
-	At                 int64            `json:"at"`
-	Busy               string           `json:"busy,omitempty"`
-	Managed            Managed          `json:"managed"`
-	ControllerOnline   bool             `json:"controllerOnline"`
-	Conflicts          Conflicts        `json:"conflicts"`
-	DNSRecoveryPending bool             `json:"dnsRecoveryPending"`
-	Settings           Settings         `json:"settings"`
-	Profile            Profile          `json:"profile"`
-	Groups             []Group          `json:"groups"`
-	Traffic            Traffic          `json:"traffic"`
-	Connections        []Connection     `json:"connections"`
-	Update             Update           `json:"update"`
-	Share              *Share           `json:"share,omitempty"`
-	Install            *InstallProgress `json:"install,omitempty"`
-	Claude             Claude           `json:"claude"`
+	At                 int64     `json:"at"`
+	Busy               string    `json:"busy,omitempty"`
+	Managed            Managed   `json:"managed"`
+	ControllerOnline   bool      `json:"controllerOnline"`
+	Conflicts          Conflicts `json:"conflicts"`
+	DNSRecoveryPending bool      `json:"dnsRecoveryPending"`
+	Settings           Settings  `json:"settings"`
+	Profile            Profile   `json:"profile"`
+	Groups             []Group   `json:"groups"`
+	// AutoGroups 是 Mihomo 自己挑节点的策略组（自动选择），不能手动切换；
+	// Now 是它此刻使用的节点。
+	AutoGroups []Group `json:"autoGroups"`
+	// Delays 是节点最近一次测速的延迟（毫秒），0 表示没测通，没测过的节点
+	// 不在里面。
+	Delays map[string]int `json:"delays"`
+	// DelayTesting 表示正在测速。
+	DelayTesting bool             `json:"delayTesting,omitempty"`
+	Traffic      Traffic          `json:"traffic"`
+	Connections  []Connection     `json:"connections"`
+	Update       Update           `json:"update"`
+	Share        *Share           `json:"share,omitempty"`
+	Install      *InstallProgress `json:"install,omitempty"`
+	Claude       Claude           `json:"claude"`
 }
 
 // ClaudeNode 是住宅节点地址的各项。密码不离开引擎，只说明有没有。
@@ -257,6 +265,13 @@ type InstallProgress struct {
 	Phase      string `json:"phase"`
 	Downloaded int64  `json:"downloaded"`
 	Total      int64  `json:"total"`
+}
+
+// BrowsingCheck 是 fixBrowsing 的结果。OK 为 false 时重新测速也没能让外网
+// 代理通起来，GUI 接着重新连接。
+type BrowsingCheck struct {
+	OK      bool   `json:"ok"`
+	Message string `json:"message"`
 }
 
 // ActionResult 是改变状态的操作的通用结果。

@@ -83,6 +83,13 @@ func TestGenerateWithoutOVPNUsesSubscription(t *testing.T) {
 	if _, ok := auto["proxies"]; ok {
 		t.Fatalf("empty proxies list must be omitted: %#v", auto)
 	}
+	// 测不通时 Mihomo 退回列表第一项，订阅开头的说明条目不能参与自动选择。
+	if auto["exclude-filter"] != config.InfoNodePattern || auto["interval"] != healthCheckInterval {
+		t.Fatalf("auto group must skip notices and retest every %ds: %#v", healthCheckInterval, auto)
+	}
+	if check, _ := provider["health-check"].(map[string]any); check["interval"] != healthCheckInterval || check["url"] != config.HealthCheckURL {
+		t.Fatalf("subscription health check = %#v", provider["health-check"])
+	}
 	proxy := got.group(config.ProxyGroup)
 	if !reflect.DeepEqual(proxy["proxies"], []any{config.AutoGroup, "DIRECT"}) || !reflect.DeepEqual(proxy["use"], []any{config.SubscriptionProvider}) {
 		t.Fatalf("unexpected 外网代理 group: %#v", proxy)

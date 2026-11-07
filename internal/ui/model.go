@@ -81,11 +81,15 @@ var tabs = []string{"状态", "配置", "策略", "规则", "连接", "日志", 
 
 type snapshot struct {
 	// loaded 表示这是一次真实的刷新结果，而不是界面刚打开时的空状态。
-	loaded        bool
-	managed       manager.Status
-	vpn           system.VPNState
-	healthy       bool
-	groups        []controller.Group
+	loaded  bool
+	managed manager.Status
+	vpn     system.VPNState
+	healthy bool
+	groups  []controller.Group
+	// autoGroups 是 Mihomo 自己挑节点的策略组（自动选择），不能手动切换。
+	autoGroups []controller.Group
+	// delays 是节点最近一次测速的延迟（毫秒），0 表示没测通。
+	delays        map[string]int
 	connections   []controller.Connection
 	connectionsAt time.Time
 	profile       *ovpn.Profile
@@ -1530,6 +1534,10 @@ func (m Model) handlePolicyKey(key string) (tea.Model, tea.Cmd) {
 	case "enter", "space":
 		m.choosing = true
 		m.choice = 0
+	case "t":
+		m.busy = true
+		m.setMessage("正在测速，最多需要几秒...")
+		return m, testDelaysCmd(m.settings.ControllerPort, m.settings.ControllerSecret)
 	}
 	return m, nil
 }
@@ -2113,7 +2121,9 @@ func refreshCmd(m Model) tea.Cmd {
 		client := controller.New(m.settings.ControllerPort, m.settings.ControllerSecret)
 		result.healthy = client.Healthy()
 		if result.healthy {
-			result.groups, _ = client.Groups()
+			if overview, err := client.Overview(config.HealthCheckURL); err == nil {
+				result.groups, result.autoGroups, result.delays = overview.Groups, overview.Auto, manager.NodeDelays(overview.Delays)
+			}
 			if connections, err := client.Connections(); err == nil {
 				result.connections = connections
 				result.connectionsAt = time.Now()
@@ -2379,8 +2389,28 @@ func testRouteCmd(controllerPort int, secret string, mixedPort int, host string,
 
 func selectPolicyCmd(port int, secret, group, choice string) tea.Cmd {
 	return func() tea.Msg {
-		err := controller.New(port, secret).Select(group, choice)
-		return actionMsg{text: fmt.Sprintf("%s 已切换为 %s", group, choice), err: err, claudeReset: err == nil}
+		client := controller.New(port, secret)
+		err := client.Select(group, choice)
+		text := fmt.Sprintf("%s 已切换为 %s", group, choice)
+		if err == nil && choice == config.AutoGroup {
+			// 上一次测速可能已经过时：节点后端断了但 TCP 还能连上时，Mihomo
+			// 不会发现，会一直用它。切过来时马上重测、重新挑选。
+			if delays, testErr := manager.TestDelays(client); testErr == nil {
+				text += "；" + manager.DelaySummary(delays)
+			}
+		}
+		return actionMsg{text: text, err: err, claudeReset: err == nil}
+	}
+}
+
+// testDelaysCmd 测一遍可以上外网的节点，测完后「自动选择」按新结果重新挑节点。
+func testDelaysCmd(port int, secret string) tea.Cmd {
+	return func() tea.Msg {
+		delays, err := manager.TestDelays(controller.New(port, secret))
+		if err != nil {
+			return actionMsg{err: fmt.Errorf("测速失败: %w", err)}
+		}
+		return actionMsg{text: "测速完成：" + manager.DelaySummary(delays), claudeReset: true}
 	}
 }
 

@@ -7,8 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -18,6 +23,7 @@ import (
 	"github.com/kadaliao/tizi/internal/claudeguard"
 	"github.com/kadaliao/tizi/internal/config"
 	"github.com/kadaliao/tizi/internal/controller"
+	"github.com/kadaliao/tizi/internal/diagnostics"
 )
 
 const testProfile = `client
@@ -820,5 +826,101 @@ func TestProxyAuthMatchesCommandLine(t *testing.T) {
 	}
 	if got := engine.currentSettings(); got.ProxyUsername != "" || got.ProxyPassword != "" {
 		t.Fatalf("关闭认证后 = %q / %q", got.ProxyUsername, got.ProxyPassword)
+	}
+}
+
+// TestTestDelaysReportsAndSnapshotShowsAutoNode 覆盖测速：没连接时直接说明，
+// 连接后测完给出总结，快照里有自动选择此刻用的节点和每个节点的延迟。
+func TestTestDelaysReportsAndSnapshotShowsAutoNode(t *testing.T) {
+	engine, _ := newTestEngine(t, io.Discard)
+	if _, err := engine.dispatch(context.Background(), Request{Method: "testDelays"}); err == nil || !strings.Contains(err.Error(), "连接后才能测速") {
+		t.Fatalf("offline testDelays error = %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		path, _ := url.PathUnescape(request.URL.EscapedPath())
+		switch path {
+		case "/version":
+			_, _ = writer.Write([]byte(`{"version":"test"}`))
+		case "/proxies":
+			_, _ = writer.Write([]byte(`{"proxies": {
+				"外网代理": {"type": "Selector", "now": "自动选择", "all": ["自动选择", "香港 01", "日本 02", "DIRECT"]},
+				"自动选择": {"type": "URLTest", "now": "日本 02", "all": ["香港 01", "日本 02"]},
+				"日本 02": {"type": "Shadowsocks", "extra": {"https://www.gstatic.com/generate_204": {"alive": true, "history": [{"delay": 85}]}}},
+				"香港 01": {"type": "Trojan"}}}`))
+		case "/group/自动选择/delay":
+			_, _ = writer.Write([]byte(`{"日本 02": 85}`))
+		case "/connections":
+			_, _ = writer.Write([]byte(`{"connections": []}`))
+		default:
+			writer.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	_, port, _ := net.SplitHostPort(strings.TrimPrefix(server.URL, "http://"))
+	engine.mu.Lock()
+	engine.settings.ControllerPort, _ = strconv.Atoi(port)
+	engine.mu.Unlock()
+
+	result, err := engine.dispatch(context.Background(), Request{Method: "testDelays"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if message := result.(ActionResult).Message; message != "测速完成：2 个节点里 1 个能用，最快的是 日本 02（85ms）" {
+		t.Fatalf("message = %q", message)
+	}
+	snapshot := engine.snapshot()
+	if len(snapshot.AutoGroups) != 1 || snapshot.AutoGroups[0].Now != "日本 02" || snapshot.Delays["日本 02"] != 85 {
+		t.Fatalf("snapshot auto groups = %#v, delays = %#v", snapshot.AutoGroups, snapshot.Delays)
+	}
+	if len(snapshot.Groups) != 1 || snapshot.Groups[0].Name != "外网代理" || snapshot.DelayTesting {
+		t.Fatalf("snapshot groups = %#v, testing = %v", snapshot.Groups, snapshot.DelayTesting)
+	}
+}
+
+// TestFixBrowsingRetestsThenReportsNode 覆盖「网页打不开」：没连接时让 GUI
+// 去重新连接；连接时先重新测速，外网通了就说出换到的节点，不通再重新连接。
+func TestFixBrowsingRetestsThenReportsNode(t *testing.T) {
+	engine, _ := newTestEngine(t, io.Discard)
+	if result := engine.fixBrowsing(); result.OK {
+		t.Fatalf("offline fixBrowsing = %#v", result)
+	}
+
+	var tested atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		path, _ := url.PathUnescape(request.URL.EscapedPath())
+		switch path {
+		case "/version":
+			_, _ = writer.Write([]byte(`{"version":"test"}`))
+		case "/proxies":
+			_, _ = writer.Write([]byte(`{"proxies": {
+				"外网代理": {"type": "Selector", "now": "自动选择", "all": ["自动选择", "日本 02", "DIRECT"]},
+				"自动选择": {"type": "URLTest", "now": "日本 02", "all": ["日本 02"]}}}`))
+		case "/group/自动选择/delay":
+			tested.Add(1)
+			_, _ = writer.Write([]byte(`{"日本 02": 85}`))
+		default:
+			writer.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	defer server.Close()
+	_, port, _ := net.SplitHostPort(strings.TrimPrefix(server.URL, "http://"))
+	engine.mu.Lock()
+	engine.settings.ControllerPort, _ = strconv.Atoi(port)
+	engine.mu.Unlock()
+
+	engine.probeProxy = func(controller.Client) diagnostics.ProxyResult {
+		return diagnostics.ProxyResult{Route: "外网代理 -> 自动选择 -> 日本 02", Node: "日本 02", Delay: 85}
+	}
+	result := engine.fixBrowsing()
+	if !result.OK || result.Message != "已换到能用的节点「日本 02」（85ms），再打开网页试试" || tested.Load() != 1 {
+		t.Fatalf("fixBrowsing = %#v, tested %d times", result, tested.Load())
+	}
+
+	engine.probeProxy = func(controller.Client) diagnostics.ProxyResult {
+		return diagnostics.ProxyResult{Route: "外网代理 -> 自动选择 -> 日本 02", Node: "日本 02"}
+	}
+	if result := engine.fixBrowsing(); result.OK || !strings.Contains(result.Message, "正在重新连接") {
+		t.Fatalf("still broken: %#v", result)
 	}
 }

@@ -144,8 +144,9 @@ func Run(paths config.Paths, settings config.Settings) []Check {
 		}
 		checks = append(checks, Check{Level: level, Name: "DNS 恢复点", Detail: detail})
 	}
-	if controller.New(settings.ControllerPort, settings.ControllerSecret).Healthy() {
+	if client := controller.New(settings.ControllerPort, settings.ControllerSecret); client.Healthy() {
 		checks = append(checks, Check{Level: OK, Name: "Controller API", Detail: fmt.Sprintf("127.0.0.1:%d 可访问", settings.ControllerPort)})
+		checks = append(checks, ProxyCheck(client))
 	} else {
 		checks = append(checks, Check{Level: Info, Name: "Controller API", Detail: "当前不可访问"})
 	}
@@ -175,6 +176,58 @@ func Run(paths config.Paths, settings config.Settings) []Check {
 		checks = append(checks, Check{Level: Info, Name: "生成配置", Detail: paths.Generated})
 	}
 	return checks
+}
+
+// ProxyProbe 是 ProxyCheck 用到的 Mihomo 接口；测试替换它以避免访问网络。
+type ProxyProbe interface {
+	Overview(testURL string) (controller.Overview, error)
+	ProxyDelay(name, probeURL string, timeout time.Duration) (int, error)
+}
+
+// ProxyResult 是经「外网代理」访问一次测速地址的结果。
+type ProxyResult struct {
+	// Route 是流量走的路线，例如「外网代理 -> 自动选择 -> 日本 02」。
+	Route string
+	// Node 是路线的最后一站，也就是实际用的节点或 DIRECT。
+	Node string
+	// Delay 是延迟（毫秒），0 表示没测通；Node 是 DIRECT 时不测。
+	Delay int
+	Err   error
+}
+
+// ProbeProxy 经「外网代理」实际访问一次测速地址。
+func ProbeProxy(probe ProxyProbe) ProxyResult {
+	overview, err := probe.Overview("")
+	if err != nil {
+		return ProxyResult{Err: fmt.Errorf("读取策略组失败: %w", err)}
+	}
+	result := ProxyResult{Route: controller.ResolveRoute(overview.AllGroups(), config.ProxyGroup)}
+	parts := strings.Split(result.Route, " -> ")
+	result.Node = parts[len(parts)-1]
+	if result.Node == "DIRECT" {
+		return result
+	}
+	result.Delay, result.Err = probe.ProxyDelay(config.ProxyGroup, config.HealthCheckURL, manager.DelayTimeout)
+	if result.Err != nil {
+		result.Delay = 0
+	}
+	return result
+}
+
+// ProxyCheck 经「外网代理」实际访问一次测速地址。其他各项只看设置和进程，
+// 只有这一项能说明海外网站打不打得开，也写出流量实际用的是哪个节点。
+func ProxyCheck(probe ProxyProbe) Check {
+	const name = "外网连通"
+	result := ProbeProxy(probe)
+	switch {
+	case result.Route == "":
+		return Check{Level: Warn, Name: name, Detail: result.Err.Error()}
+	case result.Node == "DIRECT":
+		return Check{Level: Warn, Name: name, Detail: result.Route + "：海外网站直连，多半打不开；可以在「策略」页换成代理节点"}
+	case result.Delay <= 0:
+		return Check{Level: Fail, Name: name, Detail: result.Route + " 访问 www.gstatic.com 失败；可以在「策略」页测速，换一个能用的节点"}
+	}
+	return Check{Level: OK, Name: name, Detail: fmt.Sprintf("%s，访问 www.gstatic.com %dms", result.Route, result.Delay)}
 }
 
 // residentialCheck 只检查住宅节点的设置，不访问网络；实际线路由

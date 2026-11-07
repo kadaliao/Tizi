@@ -516,11 +516,11 @@ func (m Model) policyView(width int) string {
 	}
 	var rows []string
 	for i, group := range m.snapshot.groups {
-		line := padRight(group.Name, nameColWidth) + " " + selectedStyle.Render(group.Now)
+		line := padRight(group.Name, nameColWidth) + " " + selectedStyle.Render(group.Now) + m.choiceDetail(group.Now)
 		rows = append(rows, selectable(!m.choosing && i == m.cursor, line, false))
 		if m.choosing && i == m.cursor {
 			for j, choice := range group.Choices {
-				label := choice
+				label := choice + m.choiceDetail(choice)
 				if choice == group.Now {
 					label += "  " + okStyle.Render("●")
 				}
@@ -528,8 +528,37 @@ func (m Model) policyView(width int) string {
 			}
 		}
 	}
-	rows = append(rows, "", dimStyle.Render("Enter 选择  ↑/↓ 移动  Esc 返回策略组"))
+	rows = append(rows, "", dimStyle.Render("Enter 选择  ↑/↓ 移动  t 测速  Esc 返回策略组"))
 	return panel("策略组", strings.Join(rows, "\n"), width)
+}
+
+// choiceDetail 是选项后面的说明：自动选择写出它此刻用的节点，节点写出最近
+// 一次测速的延迟。
+func (m Model) choiceDetail(choice string) string {
+	for _, group := range m.snapshot.autoGroups {
+		if group.Name == choice && group.Now != "" {
+			return dimStyle.Render(" → ") + group.Now + m.choiceDetail(group.Now)
+		}
+	}
+	delay, ok := m.snapshot.delays[choice]
+	if !ok {
+		return ""
+	}
+	return "  " + delayText(delay)
+}
+
+// delayText 按快慢给延迟上色：300ms 以内绿色，1 秒以内黄色，更慢或没测通红色。
+func delayText(delay int) string {
+	switch {
+	case delay <= 0:
+		return errorStyle.Render("超时")
+	case delay < 300:
+		return okStyle.Render(fmt.Sprintf("%dms", delay))
+	case delay < 1000:
+		return warnStyle.Render(fmt.Sprintf("%dms", delay))
+	default:
+		return errorStyle.Render(fmt.Sprintf("%dms", delay))
+	}
 }
 
 func (m Model) rulesView(width int) string {
@@ -550,7 +579,7 @@ func (m Model) rulesView(width int) string {
 	if m.ruleTested && (m.ruleMatch.Type != "" || len(m.ruleChains) > 0) {
 		route := controller.Route(m.ruleChains)
 		if route == "" {
-			route = controller.ResolveRoute(m.snapshot.groups, m.ruleMatch.Proxy)
+			route = controller.ResolveRoute(append(append([]controller.Group(nil), m.snapshot.groups...), m.snapshot.autoGroups...), m.ruleMatch.Proxy)
 		}
 		rows = append(rows, "", titleStyle.Render("实际连接路线"))
 		rows = append(rows, row("域名", truncate(m.ruleHost, valueWidth)))
@@ -937,7 +966,7 @@ func (m Model) helpView(width int) string {
 		"        选中 OVPN 行可直接粘贴或从文件管理器拖入\n" +
 		"        节点文件和住宅节点文件（claude-proxy.yaml）用 $EDITOR 编辑\n" +
 		"编辑中：←/→ 移动光标  Home/End 行首行尾  Tab 补全  Ctrl+U/K 删至行首/行尾\n" +
-		"策略页：Enter 展开并切换当前策略\n" +
+		"策略页：Enter 展开并切换当前策略；t 测速，节点后面显示延迟\n" +
 		"规则页：输入网址后 Enter 测试当前路线；选择路线后保存域名规则，再选「重载 Mihomo」生效\n" +
 		"连接页：实时查看目标、路线和上下行网速；/ 搜索，↑/↓ 滚动\n" +
 		"日志页：/ 搜索  Enter 完成  Esc 清空  ↑/↓ 滚动  PgUp/PgDn 翻页  g/G 顶部/末尾  o 定位文件\n" +

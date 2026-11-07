@@ -81,6 +81,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var scannedOVPN: [String] = []
     /// 用户点了「检查更新」、还没有结果。自动检查不改它，界面不会因此闪动。
     @Published private(set) var checkingUpdate = false
+    /// 用户点了「测速」、还没有结果。
+    @Published private(set) var testingDelays = false
     private var wakeUpdateCheck: Task<Void, Never>?
     /// 正在进行的配置分享。以 shareStart 的结果为准，直到之后生成的快照
     /// 显示分享已关闭（过期或被关闭），避免与发起前生成的旧快照赛跑。
@@ -565,6 +567,25 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 「网页打不开」：先重新测速，让自动选择换掉坏节点，再经外网代理试一次；
+    /// 通了就不用重新连接（重新连接要输密码），还是不通再重新连接。
+    func fixBrowsing() async {
+        guard snapshot?.controllerOnline == true else {
+            await reload()
+            return
+        }
+        let token = UUID()
+        pendingActions[token] = "检查线路"
+        let result = try? await client.call("fixBrowsing", as: BrowsingCheck.self)
+        pendingActions[token] = nil
+        if let result, result.ok {
+            show(result.message)
+            return
+        }
+        if let result { show(result.message) }
+        await reload()
+    }
+
     func recoverWeChat() async {
         let simple = mode == .simple
         if await perform("刷新微信直连", "recoverWeChat", announce: !simple), simple {
@@ -752,6 +773,22 @@ final class AppModel: ObservableObject {
     /// 让引擎识别粘贴的整段住宅节点地址（用户名密码在前或在后都可以）。
     func parseClaudeAddress(_ text: String) async throws -> ParsedClaudeNode {
         try await client.call("parseClaudeAddress", ["text": text])
+    }
+
+    /// 正在测速：用户点了「测速」，或者切到自动选择后引擎在重新测速。
+    var delayTesting: Bool { testingDelays || snapshot?.delayTesting == true }
+
+    /// 测一遍可以上外网的节点，测完后自动选择按新结果重新挑节点。不经过
+    /// perform：测速只读节点状态，不应该让连接按钮跟着变灰。
+    func testDelays() async {
+        testingDelays = true
+        defer { testingDelays = false }
+        do {
+            let result: ActionResult = try await client.call("testDelays")
+            show(result.message)
+        } catch {
+            show(error.localizedDescription, error: true)
+        }
     }
 
     func selectPolicy(group: String, choice: String) {

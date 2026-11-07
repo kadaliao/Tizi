@@ -123,7 +123,8 @@ struct SimpleView: View {
     private var troubleMenu: some View {
         let busy = model.busyLabel != nil
         return Menu("遇到问题") {
-            Button("网页打不开：重新连接") { Task { await model.reload() } }
+            Button("网页打不开：重新挑选节点") { Task { await model.fixBrowsing() } }
+                .help("重新测速换掉坏节点；还是打不开就重新连接")
                 .disabled(!model.running || busy)
             Button("微信图片发不出去") { Task { await model.recoverWeChat() } }
                 .disabled(model.snapshot?.controllerOnline != true || busy)
@@ -363,6 +364,7 @@ private struct ConnectPanel: View {
         switch model.busyLabel {
         case "启动 Mihomo"?: return "如果弹出密码框，请输入这台 Mac 的登录密码"
         case "安装 Mihomo 核心"?: return "第一次使用需要下载必要组件，请稍候"
+        case "检查线路"?: return "正在给节点测速，换掉打不开的节点"
         case .some: return "请稍候"
         case nil: return nil
         }

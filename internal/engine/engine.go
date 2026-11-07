@@ -81,6 +81,9 @@ type Engine struct {
 	// settingsMu 串行化设置的读、改、存，避免并发补丁互相覆盖。
 	settingsMu sync.Mutex
 
+	// delayTesting 在测速进行中为 true，同一时间只测一次。
+	delayTesting atomic.Bool
+
 	installPhase      atomic.Int32
 	installDownloaded atomic.Int64
 	installTotal      atomic.Int64
@@ -101,6 +104,8 @@ type Engine struct {
 	// pollLoop 里读写；变化时立即检测 Claude，Mihomo 意外退出几秒内就能告警。
 	lastRunning bool
 	lastExited  bool
+	// probeProxy 经外网代理实际访问一次；测试替换它以避免访问网络。
+	probeProxy func(client controller.Client) diagnostics.ProxyResult
 	// observeClaude 默认真实检测；测试替换它以避免访问网络。
 	observeClaude func(ctx context.Context, env claudeguard.Env) claudeguard.Status
 
@@ -128,6 +133,7 @@ func New(paths config.Paths, settings config.Settings, version string, out io.Wr
 		claudeKick:     make(chan struct{}, 1),
 		claudeEvents:   make(chan claudeguard.LogEvent, 16),
 		observeClaude:  claudeguard.Observe,
+		probeProxy:     func(client controller.Client) diagnostics.ProxyResult { return diagnostics.ProbeProxy(client) },
 	}
 }
 
@@ -363,7 +369,17 @@ func (e *Engine) dispatch(ctx context.Context, request Request) (any, error) {
 		}
 		e.requestRefresh()
 		e.kickClaude(true)
+		if params.Choice == config.AutoGroup {
+			// 自动选择的上一次测速可能已经过时：节点后端断了但 TCP 还能连上
+			// 时，Mihomo 不会发现，会一直用它。切过来时马上重测、重新挑选。
+			go func() { _, _ = e.testDelays() }()
+			return ActionResult{Message: fmt.Sprintf("%s 已切换为 %s，正在测速挑选最快的节点", params.Group, params.Choice)}, nil
+		}
 		return ActionResult{Message: fmt.Sprintf("%s 已切换为 %s", params.Group, params.Choice)}, nil
+	case "testDelays":
+		return e.testDelays()
+	case "fixBrowsing":
+		return e.fixBrowsing(), nil
 	case "diagnostics":
 		checks := diagnostics.Run(e.paths, e.currentSettings())
 		result := make([]DiagnosticCheck, 0, len(checks))
@@ -1087,11 +1103,14 @@ func (e *Engine) snapshot() Snapshot {
 			CoreInstalled: status.CorePath != "",
 			CoreVersion:   status.CoreVersion,
 		},
-		Conflicts: Conflicts{Tunnelblick: len(vpn.Tunnelblick), OpenVPN: len(vpn.OpenVPN)},
-		Settings:  settingsView(settings),
-		Profile:   e.profileView(settings.OVPNPath),
-		Groups:    []Group{},
-		Claude:    e.claudeView(),
+		Conflicts:    Conflicts{Tunnelblick: len(vpn.Tunnelblick), OpenVPN: len(vpn.OpenVPN)},
+		Settings:     settingsView(settings),
+		Profile:      e.profileView(settings.OVPNPath),
+		Groups:       []Group{},
+		AutoGroups:   []Group{},
+		Delays:       map[string]int{},
+		DelayTesting: e.delayTesting.Load(),
+		Claude:       e.claudeView(),
 	}
 	e.addClaudeSettings(&result.Settings, settings)
 	e.addRouteSettings(&result.Settings, settings)
@@ -1114,10 +1133,14 @@ func (e *Engine) snapshot() Snapshot {
 	var sampledAt time.Time
 	result.ControllerOnline = client.Healthy()
 	if result.ControllerOnline {
-		if groups, err := client.Groups(); err == nil {
-			for _, group := range groups {
+		if overview, err := client.Overview(config.HealthCheckURL); err == nil {
+			for _, group := range overview.Groups {
 				result.Groups = append(result.Groups, Group{Name: group.Name, Now: group.Now, Choices: group.Choices})
 			}
+			for _, group := range overview.Auto {
+				result.AutoGroups = append(result.AutoGroups, Group{Name: group.Name, Now: group.Now, Choices: group.Choices})
+			}
+			result.Delays = manager.NodeDelays(overview.Delays)
 		}
 		if current, err := client.Connections(); err == nil {
 			connections = current
@@ -1139,6 +1162,54 @@ func (e *Engine) snapshot() Snapshot {
 		result.Install = &progress
 	}
 	return result
+}
+
+// testDelays 测一遍可以上外网的节点；测完后「自动选择」按新结果重新挑节点。
+func (e *Engine) testDelays() (any, error) {
+	if !e.delayTesting.CompareAndSwap(false, true) {
+		return nil, failure(CodeBusy, "正在测速，请稍候")
+	}
+	e.requestRefresh()
+	defer func() {
+		e.delayTesting.Store(false)
+		e.requestRefresh()
+	}()
+	settings := e.currentSettings()
+	client := controller.New(settings.ControllerPort, settings.ControllerSecret)
+	if !client.Healthy() {
+		return nil, failure(CodeOffline, "还没有连接；连接后才能测速")
+	}
+	delays, err := manager.TestDelays(client)
+	if err != nil {
+		return nil, fmt.Errorf("测速失败: %w", err)
+	}
+	return ActionResult{Message: "测速完成：" + manager.DelaySummary(delays)}, nil
+}
+
+// fixBrowsing 是「网页打不开」的第一步：重新测速，让自动选择换掉坏节点，
+// 再经外网代理实际访问一次。通了就不必重新连接（重新连接要输密码）。
+func (e *Engine) fixBrowsing() BrowsingCheck {
+	settings := e.currentSettings()
+	client := controller.New(settings.ControllerPort, settings.ControllerSecret)
+	if !client.Healthy() {
+		return BrowsingCheck{Message: "还没有连接"}
+	}
+	// 切到自动选择时可能已经在测速，等它测完再看结果。
+	for deadline := time.Now().Add(2 * manager.DelayTimeout); e.delayTesting.Load() && time.Now().Before(deadline); {
+		time.Sleep(200 * time.Millisecond)
+	}
+	if _, err := e.testDelays(); err != nil {
+		var coded codedError
+		if !errors.As(err, &coded) || coded.code != CodeBusy {
+			return BrowsingCheck{Message: err.Error()}
+		}
+	}
+	// 简洁模式也用这句话，只说节点，不说策略组。
+	result := e.probeProxy(client)
+	if result.Delay <= 0 {
+		return BrowsingCheck{Message: "换了节点还是打不开，正在重新连接"}
+	}
+	return BrowsingCheck{OK: true, Message: fmt.Sprintf("已换到能用的节点「%s」（%dms），再打开网页试试", result.Node, result.Delay)}
 }
 
 // connectionViews 把本次连接列表与上一次采样对比得出实时网速，并更新采样基线。

@@ -27,6 +27,12 @@ struct Snapshot: Decodable {
     var settings: EngineSettings
     var profile: Profile
     var groups: [PolicyGroup]
+    /// Mihomo 自己挑节点的策略组（自动选择），now 是它此刻用的节点；旧引擎没有这个字段。
+    var autoGroups: [PolicyGroup]?
+    /// 节点最近一次测速的延迟（毫秒），0 表示没测通，没测过的节点不在里面；旧引擎没有这个字段。
+    var delays: [String: Int]?
+    /// 正在测速；旧引擎没有这个字段。
+    var delayTesting: Bool?
     var traffic: Traffic
     var connections: [Connection]
     var update: UpdateInfo
@@ -34,6 +40,22 @@ struct Snapshot: Decodable {
     var install: InstallProgress?
     /// Claude 访问监测的结论；旧引擎没有这个字段。
     var claude: ClaudeStatus?
+}
+
+extension Snapshot {
+    /// choice 是自动选择这类策略组时，返回它此刻用的节点。
+    func autoNow(_ choice: String) -> String? {
+        autoGroups?.first(where: { $0.name == choice })?.now
+    }
+
+    /// 选项最近一次测速的延迟（毫秒，0 表示没测通）；自动选择取它此刻用的
+    /// 节点。没测过时为 nil。
+    func delay(of choice: String) -> Int? {
+        if let now = autoNow(choice) { return delays?[now] }
+        return delays?[choice]
+    }
+
+    var hasDelays: Bool { !(delays ?? [:]).isEmpty }
 }
 
 /// 与 Go 侧 engine.Claude 对应。level 为 alert 时弹窗，同一个 key 只弹一次。
@@ -342,6 +364,12 @@ struct InstallProgress: Decodable {
     var fraction: Double? {
         total > 0 ? min(1, Double(downloaded) / Double(total)) : nil
     }
+}
+
+/// fixBrowsing 的结果；ok 为 false 时要重新连接。
+struct BrowsingCheck: Decodable {
+    var ok: Bool
+    var message: String
 }
 
 struct ActionResult: Decodable {

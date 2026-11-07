@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -13,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -29,6 +31,23 @@ type Group struct {
 	Name    string
 	Now     string
 	Choices []string
+}
+
+// Overview 是 /proxies 的摘要。
+type Overview struct {
+	// Groups 是可以手动切换的策略组（Selector）。
+	Groups []Group
+	// Auto 是 Mihomo 自己挑节点的策略组（url-test、fallback、load-balance），
+	// Now 是它此刻使用的节点，Choices 是参与挑选的全部节点。
+	Auto []Group
+	// Delays 是节点最近一次测速的延迟（毫秒），0 表示没测通；还没测过的
+	// 节点不在里面。
+	Delays map[string]int
+}
+
+// AllGroups 返回全部策略组，ResolveRoute 用它把「自动选择」展开到实际节点。
+func (o Overview) AllGroups() []Group {
+	return append(append([]Group(nil), o.Groups...), o.Auto...)
 }
 
 type Rule struct {
@@ -96,38 +115,75 @@ func (c Client) Healthy() bool {
 }
 
 func (c Client) Groups() ([]Group, error) {
+	overview, err := c.Overview("")
+	return overview.Groups, err
+}
+
+// autoGroupTypes 是 Mihomo 自己挑节点、不能手动切换的策略组类型。
+var autoGroupTypes = map[string]bool{"URLTest": true, "Fallback": true, "LoadBalance": true}
+
+type delayRecord struct {
+	Delay int `json:"delay"`
+}
+
+type delayState struct {
+	Alive   bool          `json:"alive"`
+	History []delayRecord `json:"history"`
+}
+
+// Overview 读取策略组和节点延迟。testURL 是测速地址：延迟取这个地址最近
+// 一次的结果；为空时不读延迟。
+func (c Client) Overview(testURL string) (Overview, error) {
 	request, err := c.request(http.MethodGet, c.BaseURL+"/proxies", nil)
 	if err != nil {
-		return nil, err
+		return Overview{}, err
 	}
 	response, err := c.HTTP.Do(request)
 	if err != nil {
-		return nil, err
+		return Overview{}, err
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Controller 返回 HTTP %s", response.Status)
+		return Overview{}, fmt.Errorf("Controller 返回 HTTP %s", response.Status)
 	}
 	var payload struct {
 		Proxies map[string]struct {
-			Type string   `json:"type"`
-			Now  string   `json:"now"`
-			All  []string `json:"all"`
+			Type  string                `json:"type"`
+			Now   string                `json:"now"`
+			All   []string              `json:"all"`
+			Extra map[string]delayState `json:"extra"`
 		} `json:"proxies"`
 	}
-	if err := json.NewDecoder(io.LimitReader(response.Body, 4<<20)).Decode(&payload); err != nil {
-		return nil, err
+	if err := json.NewDecoder(io.LimitReader(response.Body, 16<<20)).Decode(&payload); err != nil {
+		return Overview{}, err
 	}
-	var groups []Group
+	overview := Overview{Delays: map[string]int{}}
 	for name, proxy := range payload.Proxies {
-		// 只有 Selector 组可以手动切换；GLOBAL 聚合全部代理，是噪音。
-		if proxy.Type != "Selector" || name == "GLOBAL" || len(proxy.All) == 0 {
-			continue
+		group := Group{Name: name, Now: proxy.Now, Choices: proxy.All}
+		switch {
+		case name == "GLOBAL":
+			// GLOBAL 聚合全部代理，是噪音。
+		case proxy.Type == "Selector":
+			if len(proxy.All) > 0 {
+				overview.Groups = append(overview.Groups, group)
+			}
+		case autoGroupTypes[proxy.Type]:
+			if len(proxy.All) > 0 {
+				overview.Auto = append(overview.Auto, group)
+			}
+		case testURL != "":
+			if state, ok := proxy.Extra[testURL]; ok && len(state.History) > 0 {
+				delay := state.History[len(state.History)-1].Delay
+				if !state.Alive {
+					delay = 0
+				}
+				overview.Delays[name] = delay
+			}
 		}
-		groups = append(groups, Group{Name: name, Now: proxy.Now, Choices: proxy.All})
 	}
-	sort.Slice(groups, func(i, j int) bool { return groups[i].Name < groups[j].Name })
-	return groups, nil
+	sort.Slice(overview.Groups, func(i, j int) bool { return overview.Groups[i].Name < overview.Groups[j].Name })
+	sort.Slice(overview.Auto, func(i, j int) bool { return overview.Auto[i].Name < overview.Auto[j].Name })
+	return overview, nil
 }
 
 // Rules returns the active, ordered routing rules from Mihomo.
@@ -481,29 +537,174 @@ func (c Client) CloseConnectionsMatching(match func(Connection) bool) (int, erro
 // latency API. probeURL is fetched through the proxy, so a short timeout turns
 // this into a fast health check for a stale VPN session instead of a full test.
 func (c Client) ProxyDelay(name, probeURL string, timeout time.Duration) (int, error) {
-	query := url.Values{}
-	query.Set("timeout", strconv.Itoa(int(timeout.Milliseconds())))
-	query.Set("url", probeURL)
-	endpoint := c.BaseURL + "/proxies/" + url.PathEscape(name) + "/delay?" + query.Encode()
-	request, err := c.request(http.MethodGet, endpoint, nil)
-	if err != nil {
-		return 0, err
-	}
-	response, err := c.HTTP.Do(request)
-	if err != nil {
-		return 0, err
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("探测延迟失败: HTTP %s", response.Status)
-	}
 	var payload struct {
 		Delay int `json:"delay"`
 	}
-	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&payload); err != nil {
+	if err := c.delayRequest("/proxies/"+url.PathEscape(name)+"/delay", probeURL, timeout, &payload); err != nil {
 		return 0, err
 	}
 	return payload.Delay, nil
+}
+
+// GroupDelay 让 Mihomo 同时测一遍策略组里的全部节点，返回测通的节点和延迟
+// （毫秒），没测通的不在结果里。测 url-test 这类自动挑选的组时，Mihomo 会
+// 清掉固定的选择，按这次的结果重新挑节点。
+func (c Client) GroupDelay(name, probeURL string, timeout time.Duration) (map[string]int, error) {
+	delays := map[string]int{}
+	err := c.delayRequest("/group/"+url.PathEscape(name)+"/delay", probeURL, timeout, &delays)
+	if errors.Is(err, errNoDelay) {
+		return map[string]int{}, nil
+	}
+	return delays, err
+}
+
+// Unfix 取消自动挑选类策略组（url-test、fallback）的固定选择，并让它按
+// 最新的测速结果重新挑节点。
+func (c Client) Unfix(group string) error {
+	request, err := c.request(http.MethodDelete, c.BaseURL+"/proxies/"+url.PathEscape(group), nil)
+	if err != nil {
+		return err
+	}
+	response, err := c.HTTP.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusNoContent && response.StatusCode != http.StatusOK {
+		return fmt.Errorf("重新挑选节点失败: HTTP %s", response.Status)
+	}
+	return nil
+}
+
+// errNoDelay 是 Mihomo 测速没有测通：超时（HTTP 504）或连接出错（HTTP 503）。
+// 测策略组时表示组里一个节点都没测通。
+var errNoDelay = errors.New("测不通")
+
+// delayRequest 调用 Mihomo 的测速接口。Mihomo 自己按 timeout 结束测速，
+// HTTP 等待时间要比它长一些，不能用 Client.HTTP 的 2 秒探测超时。
+func (c Client) delayRequest(path, probeURL string, timeout time.Duration, target any) error {
+	query := url.Values{}
+	query.Set("timeout", strconv.Itoa(int(timeout.Milliseconds())))
+	query.Set("url", probeURL)
+	request, err := c.request(http.MethodGet, c.BaseURL+path+"?"+query.Encode(), nil)
+	if err != nil {
+		return err
+	}
+	httpClient := http.Client{Timeout: timeout + 3*time.Second}
+	if c.HTTP != nil {
+		httpClient.Transport = c.HTTP.Transport
+	}
+	response, err := httpClient.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	switch response.StatusCode {
+	case http.StatusOK:
+	case http.StatusGatewayTimeout, http.StatusServiceUnavailable:
+		return errNoDelay
+	default:
+		return fmt.Errorf("探测延迟失败: HTTP %s", response.Status)
+	}
+	return json.NewDecoder(io.LimitReader(response.Body, 4<<20)).Decode(target)
+}
+
+// TestDelays 测一遍可以上外网的节点，返回节点名到延迟（毫秒）的对应，0 表示
+// 没测通。先测自动挑选的策略组：它包含订阅和节点文件里的全部节点，测完后
+// Mihomo 会按新结果重新挑节点；同时单独测不在这些组里的节点（住宅节点、
+// 内网 HTTP 出口等）。skipGroups 里的策略组（内网、Tailscale）不上外网，
+// 测 probeURL 没有意义；skip 返回 true 的节点（订阅里的说明条目）也跳过。
+func (c Client) TestDelays(probeURL string, timeout time.Duration, skipGroups []string, skip func(name string) bool) (map[string]int, error) {
+	overview, err := c.Overview("")
+	if err != nil {
+		return nil, err
+	}
+	groupNames := map[string]bool{}
+	for _, group := range overview.AllGroups() {
+		groupNames[group.Name] = true
+	}
+	skipped := map[string]bool{}
+	for _, name := range skipGroups {
+		skipped[name] = true
+	}
+	special := map[string]bool{"DIRECT": true, "REJECT": true, "REJECT-DROP": true, "PASS": true, "COMPATIBLE": true}
+
+	var (
+		mu      sync.Mutex
+		results = map[string]int{}
+		wg      sync.WaitGroup
+		errs    []error
+	)
+	record := func(name string, delay int) {
+		mu.Lock()
+		defer mu.Unlock()
+		if current, ok := results[name]; !ok || delay > current {
+			results[name] = delay
+		}
+	}
+	covered := map[string]bool{}
+	for _, group := range overview.Auto {
+		if skipped[group.Name] {
+			continue
+		}
+		for _, name := range group.Choices {
+			covered[name] = true
+			if !groupNames[name] && !special[name] {
+				record(name, 0)
+			}
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			delays, err := c.GroupDelay(group.Name, probeURL, timeout)
+			// Mihomo 把自动挑选的结果缓存 10 秒，测速接口只在开始前清一次；
+			// 测速期间有流量就会按旧结果重新缓存，坏节点还要再用 10 秒。
+			// 测完再清一次，下一条连接立即按新结果挑节点。
+			_ = c.Unfix(group.Name)
+			if err != nil {
+				mu.Lock()
+				errs = append(errs, fmt.Errorf("%s: %w", group.Name, err))
+				mu.Unlock()
+				return
+			}
+			for name, delay := range delays {
+				if !groupNames[name] {
+					record(name, delay)
+				}
+			}
+		}()
+	}
+	var single []string
+	for _, group := range overview.Groups {
+		if skipped[group.Name] {
+			continue
+		}
+		for _, name := range group.Choices {
+			if covered[name] || groupNames[name] || special[name] || (skip != nil && skip(name)) {
+				continue
+			}
+			covered[name] = true
+			single = append(single, name)
+		}
+	}
+	limit := make(chan struct{}, 8)
+	for _, name := range single {
+		record(name, 0)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			limit <- struct{}{}
+			defer func() { <-limit }()
+			if delay, err := c.ProxyDelay(name, probeURL, timeout); err == nil {
+				record(name, delay)
+			}
+		}()
+	}
+	wg.Wait()
+	if len(errs) > 0 && len(results) == 0 {
+		return nil, errors.Join(errs...)
+	}
+	return results, nil
 }
 
 // StreamLogs 订阅 Mihomo 的实时日志，每收到一条调用一次 handle，直到 ctx

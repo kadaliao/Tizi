@@ -30,7 +30,7 @@ struct MenuBarContent: View {
                             set: { model.selectPolicy(group: group.name, choice: $0) }
                         )) {
                             ForEach(group.choices, id: \.self) { choice in
-                                Text(choice).tag(choice)
+                                Text(choiceLabel(choice)).tag(choice)
                             }
                         }
                         .pickerStyle(.inline)
@@ -89,6 +89,15 @@ struct MenuBarContent: View {
             Button(model.checkingUpdate ? "正在检查更新…" : "检查更新…") { Task { await model.checkForUpdates() } }
                 .disabled(model.engineState != .running || model.checkingUpdate)
         }
+    }
+
+    /// 菜单里的选项：自动选择写出它此刻用的节点，节点写出最近一次测速的延迟。
+    private func choiceLabel(_ choice: String) -> String {
+        guard let snapshot = model.snapshot else { return choice }
+        var label = choice
+        if let node = snapshot.autoNow(choice) { label += " → \(node)" }
+        if let delay = snapshot.delay(of: choice) { label += delay > 0 ? "  \(delay)ms" : "  超时" }
+        return label
     }
 
     private func showMainWindow() {

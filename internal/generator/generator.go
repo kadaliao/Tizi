@@ -300,9 +300,12 @@ func generate(profile *ovpn.Profile, settings config.Settings, output string, sh
 			"type":      "url-test",
 			"proxies":   nodeNames,
 			"url":       config.HealthCheckURL,
-			"interval":  300,
+			"interval":  healthCheckInterval,
 			"tolerance": 50,
 			"lazy":      true,
+			// 订阅开头常是「剩余流量」「套餐到期」这类说明条目；所有节点都
+			// 测不通时 Mihomo 会退回列表第一项，不能让它落到说明条目上。
+			"exclude-filter": config.InfoNodePattern,
 		}, use))
 	}
 	groups = append(groups,
@@ -478,8 +481,13 @@ func TailscaleHostname(settings config.Settings) string {
 	return "tizi"
 }
 
+// healthCheckInterval 是自动选择和节点测速的间隔（秒）。Mihomo 只在定时
+// 测速或短时间内连续拨号失败时发现节点坏了；中转节点后端断开时 TCP 仍能
+// 连上，不算拨号失败，只能等下一次定时测速，所以间隔不宜太长。
+const healthCheckInterval = 300
+
 func healthCheck() map[string]any {
-	return map[string]any{"enable": true, "url": config.HealthCheckURL, "interval": 600, "lazy": true}
+	return map[string]any{"enable": true, "url": config.HealthCheckURL, "interval": healthCheckInterval, "lazy": true}
 }
 
 func withUse(group map[string]any, use []string) map[string]any {

@@ -4,8 +4,10 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kadaliao/tizi/internal/config"
+	"github.com/kadaliao/tizi/internal/controller"
 	"github.com/kadaliao/tizi/internal/generator"
 	"github.com/kadaliao/tizi/internal/system"
 )
@@ -112,5 +114,46 @@ func TestClaudeBlockCheck(t *testing.T) {
 	}
 	if got := claudeBlockCheck(true, func() error { return errors.New("超时") }); got.Level != Fail {
 		t.Fatalf("broken: %+v", got)
+	}
+}
+
+type fakeProbe struct {
+	groups []controller.Group
+	auto   []controller.Group
+	delay  int
+	err    error
+	probed []string
+}
+
+func (f *fakeProbe) Overview(string) (controller.Overview, error) {
+	return controller.Overview{Groups: f.groups, Auto: f.auto}, nil
+}
+
+func (f *fakeProbe) ProxyDelay(name, _ string, _ time.Duration) (int, error) {
+	f.probed = append(f.probed, name)
+	return f.delay, f.err
+}
+
+func TestProxyCheckProbesThroughProxyGroup(t *testing.T) {
+	groups := []controller.Group{{Name: config.ProxyGroup, Now: config.AutoGroup}}
+	auto := []controller.Group{{Name: config.AutoGroup, Now: "日本 02"}}
+
+	ok := &fakeProbe{groups: groups, auto: auto, delay: 85}
+	if check := ProxyCheck(ok); check.Level != OK || check.Detail != "外网代理 -> 自动选择 -> 日本 02，访问 www.gstatic.com 85ms" {
+		t.Fatalf("working route: %#v", check)
+	}
+	if len(ok.probed) != 1 || ok.probed[0] != config.ProxyGroup {
+		t.Fatalf("must probe the 外网代理 group itself, probed %v", ok.probed)
+	}
+
+	// 「自动选择」停在一个已经坏掉的节点上：诊断必须报出来，而不是显示正常。
+	broken := &fakeProbe{groups: groups, auto: auto, err: errors.New("timeout")}
+	if check := ProxyCheck(broken); check.Level != Fail || !strings.Contains(check.Detail, "日本 02 访问 www.gstatic.com 失败") {
+		t.Fatalf("broken route: %#v", check)
+	}
+
+	direct := &fakeProbe{groups: []controller.Group{{Name: config.ProxyGroup, Now: "DIRECT"}}}
+	if check := ProxyCheck(direct); check.Level != Warn || len(direct.probed) != 0 {
+		t.Fatalf("direct route: %#v, probed %v", check, direct.probed)
 	}
 }

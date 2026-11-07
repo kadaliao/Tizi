@@ -1323,3 +1323,27 @@ func TestRefreshReportsLeftoverDNS(t *testing.T) {
 		t.Fatalf("refresh should report a leftover DNS snapshot: loaded=%v leftover=%v", msg.loaded, msg.dnsLeftover)
 	}
 }
+
+func TestPolicyViewShowsAutoNodeAndDelays(t *testing.T) {
+	model := Model{
+		active:   tabPolicy,
+		choosing: true,
+		snapshot: snapshot{
+			healthy:    true,
+			groups:     []controller.Group{{Name: "外网代理", Now: "自动选择", Choices: []string{"自动选择", "香港 01", "日本 02", "美国 03", "DIRECT"}}},
+			autoGroups: []controller.Group{{Name: "自动选择", Now: "日本 02", Choices: []string{"香港 01", "日本 02", "美国 03"}}},
+			delays:     map[string]int{"香港 01": 0, "日本 02": 85, "美国 03": 1200},
+		},
+	}
+	view := ansi.Strip(model.policyView(80))
+	for _, want := range []string{"自动选择 → 日本 02  85ms", "香港 01  超时", "美国 03  1200ms", "t 测速"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("policy view lacks %q", want)
+		}
+	}
+	for _, line := range strings.Split(view, "\n") {
+		if strings.Contains(line, "DIRECT") && (strings.Contains(line, "ms") || strings.Contains(line, "超时")) {
+			t.Errorf("DIRECT must not show a delay: %q", line)
+		}
+	}
+}

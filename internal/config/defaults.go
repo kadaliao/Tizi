@@ -46,6 +46,11 @@ const (
 
 	// HealthCheckURL 是自动选择和订阅节点测速使用的地址。
 	HealthCheckURL = "https://www.gstatic.com/generate_204"
+
+	// InfoNodePattern 匹配机场写在订阅里的说明条目（剩余流量、到期时间、
+	// 官网地址等），它们不是能用的节点。自动选择排除它们，测速也跳过。
+	// Go 和 Mihomo（.NET 风格正则）都能解析这个写法。
+	InfoNodePattern = "剩余|到期|过期|有效期|重置|套餐|官网|网址|(?i:expire|traffic)"
 )
 
 // DefaultIntranetCIDRs 是导入了 .ovpn、但设置和 .ovpn 里都没有内网网段时
