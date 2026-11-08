@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -72,6 +73,26 @@ func TestCheckRejectsInvalidReleaseTag(t *testing.T) {
 
 	if _, err := check(context.Background(), server.Client(), server.URL, "v0.1.12"); err == nil {
 		t.Fatal("expected invalid release tag error")
+	}
+}
+
+func TestInstallRefusesHomebrewKeg(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		t.Errorf("unexpected request %s", request.URL)
+	}))
+	defer server.Close()
+	for _, executable := range []string{
+		"/opt/homebrew/Cellar/tizi/1.2.0/bin/tizi",
+		"/usr/local/Cellar/tizi/1.2.0/bin/tizi",
+		"/home/linuxbrew/.linuxbrew/Cellar/tizi/1.2.0/bin/tizi",
+	} {
+		_, err := install(context.Background(), "v1.3.0", server.URL, executable, "", server.Client())
+		if !errors.Is(err, ErrHomebrew) {
+			t.Fatalf("install(%q) error = %v, want ErrHomebrew", executable, err)
+		}
+	}
+	if homebrewManaged("/Users/me/.local/bin/tizi") {
+		t.Fatal("~/.local/bin/tizi is not managed by Homebrew")
 	}
 }
 

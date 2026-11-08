@@ -34,6 +34,7 @@ make install install-gui   # 安装到本机 ~/.local/bin 和 ~/Applications
 | `internal/tracescope` | 内嵌的 TraceScope 看板（`web/` 是 vendored 快照，见 `VENDOR.md`） |
 | `macos/` | SwiftUI 桌面版 |
 | `scripts/release.sh` | 本地发布构建 |
+| `scripts/update-homebrew-tap.sh` | 发布后更新 Homebrew tap |
 
 ## 发布
 
@@ -50,9 +51,14 @@ make release VERSION="$VERSION"   # 产物在 dist/
 git tag -a "$VERSION" -m "$VERSION"
 git push --atomic origin main "refs/tags/$VERSION"
 gh release create "$VERSION" dist/* --verify-tag --title "$VERSION" --notes-file /path/to/release-notes.md
+scripts/update-homebrew-tap.sh "$VERSION"
 ```
 
-`make release` 要求工作树干净、README 里的版本号与 `VERSION` 一致，产出 macOS（arm64、amd64）和 Linux amd64 的命令行包、桌面版 zip 和 dmg，以及 `checksums.txt`。`install.sh` 和 `tizi update` 按这些文件名下载，改名时要同步修改。
+`make release` 要求工作树干净、README 里的版本号与 `VERSION` 一致，产出 macOS（arm64、amd64）和 Linux amd64 的命令行包、桌面版 zip 和 dmg，以及 `checksums.txt`。`install.sh`、`tizi update` 和 Homebrew tap 按这些文件名下载，改名时要同步修改。
+
+`scripts/update-homebrew-tap.sh` 从刚发布的 Release 读取 `checksums.txt`，重新生成 [kadaliao/homebrew-tap](https://github.com/kadaliao/homebrew-tap) 里的 `Formula/tizi.rb`（终端版和命令行）和 `Casks/tizi-desktop.rb`（桌面版），提交并推送。formula 和 cask 的内容写在这个脚本里，要改就改脚本，不要直接改 tap。想先检查再推送：`TAP_DIR=<本地 tap 仓库> PUSH=0 scripts/update-homebrew-tap.sh "$VERSION"`。
+
+Homebrew 装的命令行在 `…/Cellar/tizi/<版本>/` 下，`appupdate.Install` 不会替换它，而是提示改用 `brew upgrade tizi`，免得和 Homebrew 记录的版本对不上。cask 标了 `auto_updates`，桌面版照常在应用里更新。
 
 ## 第三方组件
 

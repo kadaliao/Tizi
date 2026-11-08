@@ -1,6 +1,6 @@
 # Tizi 文档
 
-- [安装与使用](getting-started.md)：准备、安装、桌面版和终端版的使用步骤
+- [安装与使用](getting-started.md)：准备、安装（含 Homebrew）、桌面版和终端版的使用步骤
 - [配置线路](configuration.md)：订阅、节点文件、内网（`.ovpn`）、Tailscale
 - [Claude 线路保护](claude.md)：住宅节点、访问监测、直连保护
 - [命令行](cli.md)：常用命令和连接参数

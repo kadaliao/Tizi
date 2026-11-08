@@ -151,7 +151,25 @@ func resolveExecutable(path string) (string, error) {
 	return resolved, nil
 }
 
+// ErrHomebrew 表示命令行程序由 Homebrew 安装，要用 brew 更新。
+var ErrHomebrew = errors.New("tizi 是用 Homebrew 安装的，请运行 brew upgrade tizi 更新")
+
+// homebrewManaged 判断真实路径是否在 Homebrew 的 Cellar 里。自己替换这个文件
+// 会让 brew 记录的版本和实际不一致，所以交给 brew upgrade。
+func homebrewManaged(executable string) bool {
+	return strings.Contains(filepath.ToSlash(executable), "/Cellar/tizi/")
+}
+
+// FromHomebrew 报告当前运行的程序是否由 Homebrew 安装。
+func FromHomebrew() bool {
+	executable, err := ExecutablePath()
+	return err == nil && homebrewManaged(executable)
+}
+
 func install(ctx context.Context, version, releaseURL, executable, desktopApp string, client *http.Client) (Result, error) {
+	if homebrewManaged(executable) {
+		return Result{}, ErrHomebrew
+	}
 	if _, ok := parseVersion(version); !ok {
 		return Result{}, fmt.Errorf("APP 更新版本标签无效: %q", version)
 	}

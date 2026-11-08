@@ -1,6 +1,6 @@
 # 命令行
 
-把 `~/.local/bin` 加入 `PATH` 后可以直接使用 `tizi`：
+把 `~/.local/bin` 加入 `PATH` 后可以直接使用 `tizi`（用 Homebrew 装的已经在 `PATH` 里）：
 
 ```sh
 tizi                              # 启动终端版界面
@@ -9,7 +9,7 @@ tizi stop
 tizi reload                       # 重新生成配置并重启，让设置和规则修改生效
 tizi status
 tizi diagnose                     # 只读诊断本机网络和依赖
-tizi update
+tizi update                       # 用 Homebrew 装的改用 brew upgrade tizi
 tizi install-core                 # 加 --channel alpha 安装滚动 Alpha 构建
 tizi generate                     # 只生成 Mihomo 配置
 tizi validate                     # 生成并用 Mihomo 校验

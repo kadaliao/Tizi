@@ -22,6 +22,13 @@ curl -fsSL https://raw.githubusercontent.com/kadaliao/Tizi/main/install.sh | sh
 
 Mac 上会同时装好桌面版。也可以从 [Releases](https://github.com/kadaliao/Tizi/releases) 下载 `.dmg` 直接安装。当前版本是 `v1.2.0`。
 
+用 Homebrew 也可以：
+
+```sh
+brew install --cask kadaliao/tap/tizi-desktop   # Mac 桌面版，自带终端版
+brew install kadaliao/tap/tizi                  # 只要终端版和命令行（Mac 或 Ubuntu）
+```
+
 ## 快速开始
 
 1. 打开 Tizi（Mac：`open ~/Applications/TiziDesktop.app`；终端：`~/.local/bin/tizi`）。

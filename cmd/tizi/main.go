@@ -171,6 +171,9 @@ func runCommand(args []string) error {
 			fmt.Printf("当前已是最新版本 %s\n", status.Current)
 			return nil
 		}
+		if appupdate.FromHomebrew() {
+			return fmt.Errorf("发现新版本 %s；%w", status.Latest, appupdate.ErrHomebrew)
+		}
 		fmt.Fprintf(os.Stderr, "发现新版本 %s，正在更新...\n", status.Latest)
 		result, err := appupdate.Install(ctx, status.Latest)
 		if err != nil {

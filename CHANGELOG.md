@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+### 新增
+
+- 可以用 Homebrew 安装：Mac 桌面版 `brew install --cask kadaliao/tap/tizi-desktop`，只要终端版和命令行用 `brew install kadaliao/tap/tizi`（Mac 或 Ubuntu）。
+
+### 变更
+
+- 用 Homebrew 装的 tizi 不再自己替换程序：`tizi update` 和终端版的「更新 APP」会提示改用 `brew upgrade tizi`，免得和 Homebrew 记录的版本对不上。
+
 ## [1.2.0] - 2026-11-08
 
 ### 新增
