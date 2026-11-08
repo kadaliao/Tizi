@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-08
+
 ### 新增
 
 - 节点测速：桌面版「策略」页有「测速」按钮，每个节点旁边显示延迟（绿色快、橙色一般、红色慢或测不通），可以按延迟排序；菜单栏的节点列表也显示延迟。终端版在「策略」页按 `t` 测速。连接后不用手动测，Mihomo 自己的定时测速结果也会显示出来。
@@ -51,6 +53,7 @@
 - 系统：TUN 接管、DNS 接管与恢复、连接期间关闭公网 IPv6、隧道自动恢复、微信图片直连修复、诊断。
 - 界面：macOS 桌面版（简洁模式和高级模式、菜单栏）、终端版、命令行；一键更新；Clash Mi 扫码导入；TraceScope 网络可视化看板。
 
-[Unreleased]: https://github.com/kadaliao/Tizi/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/kadaliao/Tizi/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/kadaliao/Tizi/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/kadaliao/Tizi/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/kadaliao/Tizi/releases/tag/v1.0.0
