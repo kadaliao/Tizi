@@ -276,8 +276,9 @@ func generate(profile *ovpn.Profile, settings config.Settings, output string, sh
 		privateDomains = append(privateDomains, config.TailscaleDomain)
 		nameserverPolicy["+."+config.TailscaleDomain] = []string{"tailscale://" + config.TailscaleProxyName}
 	}
-	fakeIPFilter := make([]string, 0, len(privateDomains))
-	for _, domain := range privateDomains {
+	fakeIPDomains := config.NormalizeDomains(append(privateDomains, config.FakeIPBypassDomains...))
+	fakeIPFilter := make([]string, 0, len(fakeIPDomains))
+	for _, domain := range fakeIPDomains {
 		fakeIPFilter = append(fakeIPFilter, "+."+domain)
 	}
 	snifferSkip := make([]string, 0, len(config.SnifferSkipDomains))

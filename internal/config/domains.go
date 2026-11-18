@@ -1,9 +1,12 @@
 package config
 
 var (
+	// FakeIPBypassDomains 是始终返回真实 IP 的公共域名后缀。
+	FakeIPBypassDomains = []string{"cdn-apple.com", "apple.com"}
+
 	// ExternalManagedResolverDomains 是 macOS 上额外交给 Mihomo DNS 解析的
 	// 外网域名族（写进 /etc/resolver），避免系统绕过 Mihomo 拿到污染结果。
-	ExternalManagedResolverDomains = []string{
+	ExternalManagedResolverDomains = append([]string{
 		"google.com",
 		"googleapis.com",
 		"gstatic.com",
@@ -18,13 +21,9 @@ var (
 		"chatgpt.com",
 		"oaistatic.com",
 		"oaiusercontent.com",
-		"anthropic.com",
-		"claudeusercontent.com",
-		"claude.ai",
-		"claude.com",
 		"github.com",
 		"githubusercontent.com",
-	}
+	}, ClaudeDomains...)
 	// SnifferSkipDomains 是嗅探到后不得改写目标地址的域名族。
 	//
 	// 微信用自家 HTTPDNS 挑选服务器后按 IP 直连，SNI/Host 只是占位
@@ -84,5 +83,10 @@ var (
 		"claude.com",
 		"anthropic.com",
 		"claudeusercontent.com",
+		"clau.de",
+		"claudemcpclient.com",
+		"claudemcpcontent.com",
+		"claude.app",
+		"anthropic.auth0.com",
 	}
 )

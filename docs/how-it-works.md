@@ -34,6 +34,8 @@ Tizi 把你的订阅、节点、`.ovpn` 和 Tailscale 设置生成一份 [Mihomo
 
 内网域名经隧道交给内网 DNS 解析，`*.ts.net` 交给 Tailscale 解析，其余由 Mihomo 按规则解析。
 
+Mihomo 为 `apple.com`、`cdn-apple.com` 及其子域名返回真实 IP。Apple 连接仍按分流规则选择出口。
+
 ## IPv6
 
 TUN 只接管 IPv4，所以连接期间还会关闭物理网卡的公网 IPv6，否则双栈的海外网站会走 IPv6 直连，绕过代理并暴露真实地址：

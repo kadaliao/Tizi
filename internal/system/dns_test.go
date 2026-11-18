@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/kadaliao/tizi/internal/config"
 )
 
 type fakeDNSRunner struct {
@@ -243,12 +245,14 @@ func TestPrepareAndRestoreDNS(t *testing.T) {
 	if !strings.Contains(string(tailnetResolverContent), "port 1053") {
 		t.Fatalf("ts.net resolver did not point to mihomo DNS: %s", tailnetResolverContent)
 	}
-	twimgResolverContent, err := os.ReadFile(filepath.Join(resolverDir, "twimg.com"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(twimgResolverContent), "port 1053") {
-		t.Fatalf("twimg.com resolver did not point to mihomo DNS: %s", twimgResolverContent)
+	for _, domain := range append([]string{"twimg.com"}, config.ClaudeDomains...) {
+		content, err := os.ReadFile(filepath.Join(resolverDir, domain))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(content), "port 1053") {
+			t.Fatalf("%s resolver did not point to mihomo DNS: %s", domain, content)
+		}
 	}
 
 	restored, err := restoreDNS(statePath, runner)

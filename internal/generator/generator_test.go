@@ -106,8 +106,8 @@ func TestGenerateSelectedRemoteAndPermissions(t *testing.T) {
 		t.Fatalf("intranet domains must use the intranet DNS through the tunnel: %#v", parsed.DNS)
 	}
 	fakeIPFilter, ok := parsed.DNS["fake-ip-filter"].([]any)
-	if !ok || !reflect.DeepEqual(fakeIPFilter, []any{"+.corp.example.com"}) {
-		t.Fatalf("intranet domains are not excluded from fake IP responses: %#v", parsed.DNS)
+	if !ok || !reflect.DeepEqual(fakeIPFilter, []any{"+.corp.example.com", "+.cdn-apple.com", "+.apple.com"}) {
+		t.Fatalf("unexpected fake IP exclusions: %#v", fakeIPFilter)
 	}
 	if !contains(parsed.Rules, "DOMAIN-SUFFIX,corp.example.com,内网") || !contains(parsed.Rules, "IP-CIDR,10.0.0.0/8,内网,no-resolve") {
 		t.Fatalf("intranet rules missing: %#v", parsed.Rules)
@@ -417,7 +417,10 @@ func TestClaudeDomainsUseClaudeGroupBeforeCustomRules(t *testing.T) {
 	if customIndex < 0 || chinaIndex < 0 {
 		t.Fatalf("custom or GeoIP rule missing: %#v", got)
 	}
-	for _, domain := range []string{"claude.ai", "claude.com", "anthropic.com", "claudeusercontent.com"} {
+	for _, domain := range []string{
+		"claude.ai", "claude.com", "anthropic.com", "claudeusercontent.com",
+		"clau.de", "claudemcpclient.com", "claudemcpcontent.com", "claude.app", "anthropic.auth0.com",
+	} {
 		rule := "DOMAIN-SUFFIX," + domain + ",Claude"
 		index := indexOf(got, rule)
 		if index < 0 {

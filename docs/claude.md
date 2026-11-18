@@ -1,6 +1,11 @@
 # Claude 线路保护
 
-`claude.ai`、`claude.com`、`anthropic.com`、`claudeusercontent.com` 固定走「Claude」线路。这条线路没有直连选项，自定义规则也改不了，这些域名的 UDP 流量直接拦截；一个代理节点都没有时 Claude 直接打不开，不会直连。
+以下域名及其子域名固定走「Claude」线路，优先于自定义规则。macOS 也会把它们的 DNS 查询交给 Mihomo。
+
+- `claude.ai`、`claude.com`、`anthropic.com`、`claudeusercontent.com`
+- `clau.de`、`claudemcpclient.com`、`claudemcpcontent.com`、`claude.app`、`anthropic.auth0.com`
+
+这条线路只走代理。出口不支持 UDP 时，Mihomo 会拦截这些域名的 UDP 流量。没有可用代理时，连接会失败。
 
 ## 住宅节点
 
