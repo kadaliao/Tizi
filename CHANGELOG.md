@@ -2,7 +2,12 @@
 
 本文件记录 Tizi 每个版本的主要变更，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [1.2.1] - 2026-11-18
+
+### 修复
+
+- Claude 短链接、MCP、桌面预览和登录域名（`clau.de`、`claudemcpclient.com`、`claudemcpcontent.com`、`claude.app`、`anthropic.auth0.com`）及其子域名现在走「Claude」线路。macOS 也会将这些域名交给 Mihomo 解析。
+- Mihomo 为 `apple.com`、`cdn-apple.com` 及其子域名返回真实 IP。Apple 连接仍按分流规则选择出口。
 
 ### 新增
 
@@ -61,7 +66,7 @@
 - 系统：TUN 接管、DNS 接管与恢复、连接期间关闭公网 IPv6、隧道自动恢复、微信图片直连修复、诊断。
 - 界面：macOS 桌面版（简洁模式和高级模式、菜单栏）、终端版、命令行；一键更新；Clash Mi 扫码导入；TraceScope 网络可视化看板。
 
-[Unreleased]: https://github.com/kadaliao/Tizi/compare/v1.2.0...HEAD
+[1.2.1]: https://github.com/kadaliao/Tizi/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/kadaliao/Tizi/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/kadaliao/Tizi/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/kadaliao/Tizi/releases/tag/v1.0.0

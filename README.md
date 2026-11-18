@@ -20,7 +20,7 @@ https://github.com/user-attachments/assets/5ab1f5ab-4146-4431-ba94-cc4b98bb2c7e
 curl -fsSL https://raw.githubusercontent.com/kadaliao/Tizi/main/install.sh | sh
 ```
 
-Mac 上会同时装好桌面版。也可以从 [Releases](https://github.com/kadaliao/Tizi/releases) 下载 `.dmg` 直接安装。当前版本是 `v1.2.0`。
+Mac 上会同时装好桌面版。也可以从 [Releases](https://github.com/kadaliao/Tizi/releases) 下载 `.dmg` 直接安装。当前版本是 `v1.2.1`。
 
 用 Homebrew 也可以：
 
